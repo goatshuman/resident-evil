@@ -12,10 +12,13 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   Interaction,
   MessageFlags,
   ChannelType,
   Guild,
+  OverwriteType,
 } from "discord.js";
 import { XMLParser } from "fast-xml-parser";
 import { parse as parseHtml } from "node-html-parser";
@@ -45,6 +48,11 @@ const BYPASS_SHOP_CHANNEL_ID       = "1515237359392788601";
 const PESETAS_LB_CHANNEL_ID        = "1515244481589411871";
 const WEAPON_INFO_CHANNEL_ID       = "1515246349363449896";
 const SERVER_GUIDE_CHANNEL_ID      = "1515004712229802025";
+
+// ── Support / Ticket IDs ─────────────────────────────────────────────────────
+const SUPPORT_CATEGORY_ID     = "1515329539574861854";
+const TICKET_PANEL_CHANNEL_ID = "1515329765408509952";
+const SUPPORT_STAFF_ROLE_ID   = "1515330084398039120";
 
 // ── Role IDs ────────────────────────────────────────────────────────────────
 const SURVIVOR_ROLE_ID   = "1515239131175845948";
@@ -95,6 +103,7 @@ const BYPASS_MSG_ID_FILE      = path.join(SRC_DIR, "bypass-shop-msg-id.json");
 const PESETAS_LB_MSG_ID_FILE  = path.join(SRC_DIR, "pesetas-lb-msg-id.json");
 const WEAPON_INFO_MSG_ID_FILE  = path.join(SRC_DIR, "weapon-info-msg-id.json");
 const SERVER_GUIDE_MSG_ID_FILE = path.join(SRC_DIR, "server-guide-msg-id.json");
+const TICKET_PANEL_MSG_ID_FILE = path.join(SRC_DIR, "ticket-panel-msg-id.json");
 
 // ── Intervals ────────────────────────────────────────────────────────────────
 const NEWS_INTERVAL_MS       = 12 * 60 * 60 * 1000;
@@ -1348,6 +1357,117 @@ async function updateVillainLeaderboard() {
 }
 
 // ============================================================
+// TICKET SYSTEM
+// ============================================================
+function buildTicketPanelEmbed(): EmbedBuilder {
+  return new EmbedBuilder()
+    .setColor(0x8b0000)
+    .setTitle("☣️ UMBRELLA CORPORATION — SUPPORT DIVISION")
+    .setDescription(
+      "> **Need assistance, survivor?**\n" +
+      "> Select the appropriate category below to open a support ticket.\n" +
+      "> Our staff will respond as soon as possible.\n" +
+      "> \n" +
+      "> ⚠️ **One active ticket per user.** Resolve your current ticket before opening a new one."
+    )
+    .addFields(
+      { name: "🐛 Found bugs/glitches in bot", value: "> Report broken commands, economy errors, or bot malfunctions.", inline: false },
+      { name: "🚨 Report anyone", value: "> Submit a report against a user for rule violations or suspicious activity.", inline: false },
+      { name: "💡 Ideas & Suggestions", value: "> Share your ideas to improve the server or bot features.", inline: false },
+    )
+    .setFooter({ text: "UMBRELLA SUPPORT DIVISION — CLASSIFIED TICKET SYSTEM" })
+    .setTimestamp();
+}
+
+function buildTicketSelectRow(): ActionRowBuilder<StringSelectMenuBuilder> {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("ticket_select")
+    .setPlaceholder("☣️ Select a ticket category...")
+    .addOptions(
+      new StringSelectMenuOptionBuilder()
+        .setLabel("Found bugs/glitches in bot")
+        .setDescription("Report broken commands, economy errors, or bot malfunctions.")
+        .setValue("bug")
+        .setEmoji("🐛"),
+      new StringSelectMenuOptionBuilder()
+        .setLabel("Report anyone")
+        .setDescription("Report a user for rule violations or suspicious activity.")
+        .setValue("report")
+        .setEmoji("🚨"),
+      new StringSelectMenuOptionBuilder()
+        .setLabel("Ideas & Suggestions")
+        .setDescription("Share your ideas to improve the server or bot features.")
+        .setValue("idea")
+        .setEmoji("💡"),
+    );
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+}
+
+function buildTicketWelcomeEmbed(type: string, user: { id: string; username: string }): EmbedBuilder {
+  const labels: Record<string, string> = {
+    bug: "🐛 Bug / Glitch Report",
+    report: "🚨 User Report",
+    idea: "💡 Idea & Suggestion",
+  };
+  const instructions: Record<string, string> = {
+    bug: "Please describe the bug or glitch in detail. Include what command or feature is broken and what you expected to happen.",
+    report: "Please provide the username or mention of the person you are reporting, along with evidence and a description of the incident.",
+    idea: "Please describe your idea or suggestion in detail. Explain how it would benefit the server or improve the bot.",
+  };
+  return new EmbedBuilder()
+    .setColor(0x8b0000)
+    .setTitle(`${labels[type] ?? "Support Ticket"} — CASE OPENED`)
+    .setDescription(
+      `> **Ticket Owner:** <@${user.id}>\n` +
+      `> **Status:** 🟢 Open — Awaiting Staff Response\n` +
+      `> \n` +
+      `> **Instructions:**\n` +
+      `> ${instructions[type] ?? "Please describe your issue."}\n` +
+      `> \n` +
+      `> <@&${SUPPORT_STAFF_ROLE_ID}> — A ticket has been opened.`
+    )
+    .setFooter({ text: "UMBRELLA SUPPORT DIVISION — Click 🔒 Close Ticket when resolved." })
+    .setTimestamp();
+}
+
+function buildTicketCloseRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId("ticket_close")
+      .setLabel("🔒 Close Ticket")
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+async function updateTicketPanel() {
+  const embed = buildTicketPanelEmbed();
+  const row = buildTicketSelectRow();
+  const existingId = loadPersistentMsgId(TICKET_PANEL_MSG_ID_FILE);
+
+  if (existingId) {
+    try {
+      const channel = await client.channels.fetch(TICKET_PANEL_CHANNEL_ID);
+      if (!channel || typeof (channel as any).messages !== "object") return;
+      const msg = await (channel as TextChannel).messages.fetch(existingId);
+      await msg.edit({ embeds: [embed], components: [row as any] });
+      console.log(`[Tickets] Panel updated. ID: ${existingId}`);
+      return;
+    } catch (err: any) {
+      if (err?.code !== 10008) { console.error("[Tickets] Failed to edit panel:", err); return; }
+      console.log("[Tickets] Panel gone. Posting new one...");
+    }
+  }
+
+  try {
+    const channel = await client.channels.fetch(TICKET_PANEL_CHANNEL_ID);
+    if (!channel || typeof (channel as any).send !== "function") return;
+    const msg = await (channel as TextChannel).send({ embeds: [embed], components: [row as any] });
+    savePersistentMsgId(TICKET_PANEL_MSG_ID_FILE, msg.id);
+    console.log(`[Tickets] Panel posted. ID: ${msg.id}`);
+  } catch (err) { console.error("[Tickets] Failed to post panel:", err); }
+}
+
+// ============================================================
 // SHOP
 // ============================================================
 let currentShopStock: { weapon: Weapon; price: number }[] = [];
@@ -1395,6 +1515,7 @@ client.once("ready", async () => {
     updateVillainLeaderboard(),
     updateShop(),
     updatePesetasLeaderboard(),
+    updateTicketPanel(),
   ]);
 
   // Resume pending 24h dead-role timers + start auto boss spawn
@@ -1422,8 +1543,104 @@ client.once("ready", async () => {
 // INTERACTIONS
 // ============================================================
 client.on("interactionCreate", async (interaction: Interaction) => {
+  // ── String select menu — ticket creation ────────────────────
+  if (interaction.isStringSelectMenu() && interaction.customId === "ticket_select") {
+    const ticketType = interaction.values[0];
+    const user = interaction.user;
+    const guild = interaction.guild;
+    if (!guild) return;
+
+    const prefixMap: Record<string, string> = { bug: "bug", report: "report", idea: "idea" };
+    const prefix = prefixMap[ticketType] ?? "ticket";
+    const safeName = user.username.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 20) || user.id;
+    const channelName = `${prefix}-${safeName}`;
+
+    // One active ticket check — scan category for any channel matching user id or username
+    const category = guild.channels.cache.get(SUPPORT_CATEGORY_ID);
+    if (category) {
+      const existing = guild.channels.cache.find(
+        (ch) =>
+          ch.parentId === SUPPORT_CATEGORY_ID &&
+          (ch.name.endsWith(`-${safeName}`) || ch.name.includes(user.id))
+      );
+      if (existing) {
+        await interaction.reply({
+          content: `> ❌ **You already have an open ticket!** Please resolve your active ticket <#${existing.id}> before creating a new one.`,
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+    }
+
+    try {
+      const ticketChannel = await guild.channels.create({
+        name: channelName,
+        type: ChannelType.GuildText,
+        parent: SUPPORT_CATEGORY_ID,
+        permissionOverwrites: [
+          { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+          {
+            id: user.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+            ],
+          },
+          {
+            id: SUPPORT_STAFF_ROLE_ID,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory,
+              PermissionFlagsBits.ManageMessages,
+            ],
+          },
+        ],
+      });
+
+      await ticketChannel.send({
+        embeds: [buildTicketWelcomeEmbed(ticketType, user)],
+        components: [buildTicketCloseRow()],
+      });
+
+      console.log(`[Tickets] Opened #${channelName} for ${user.tag} (type: ${ticketType})`);
+      await interaction.reply({
+        content: `> ✅ **Ticket opened!** Head to <#${ticketChannel.id}> — our staff will be with you shortly.`,
+        flags: MessageFlags.Ephemeral,
+      });
+    } catch (err) {
+      console.error("[Tickets] Failed to create ticket channel:", err);
+      await interaction.reply({
+        content: "> ⚠️ Failed to create your ticket. Please contact a staff member directly.",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    return;
+  }
+
   if (!interaction.isButton()) return;
   const { customId, user, message } = interaction;
+
+  // ── Ticket close ────────────────────────────────────────────
+  if (customId === "ticket_close") {
+    const channel = interaction.channel as TextChannel | null;
+    if (!channel) return;
+    const member = interaction.member as GuildMember | null;
+    const isStaff = member?.roles.cache.has(SUPPORT_STAFF_ROLE_ID) ?? false;
+    const safeName = user.username.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 20) || user.id;
+    const isOwner = channel.name.endsWith(`-${safeName}`) || channel.name.includes(user.id);
+
+    if (!isStaff && !isOwner) {
+      await interaction.reply({ content: "> ❌ Only the ticket owner or staff can close this ticket.", flags: MessageFlags.Ephemeral });
+      return;
+    }
+
+    await interaction.reply({ content: "> 🔒 **Ticket closing...** This channel will be deleted in 5 seconds." });
+    console.log(`[Tickets] Closing #${channel.name} — requested by ${user.tag}`);
+    setTimeout(() => channel.delete("Ticket closed").catch(() => {}), 5000);
+    return;
+  }
 
   // ── Hero vote (max 3) ───────────────────────────────────────
   if (customId.startsWith("hero_")) {
