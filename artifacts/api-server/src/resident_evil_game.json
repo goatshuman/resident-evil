@@ -1,0 +1,87 @@
+{
+  "weapon_registry": {
+    "high_tier": [
+      {
+        "name": "Infinite Rocket Launcher",
+        "damage_multiplier": 5000,
+        "tier": "high"
+      },
+      {
+        "name": "Handcannon (.50 Magnum)",
+        "damage_multiplier": 2500,
+        "tier": "high"
+      },
+      {
+        "name": "Chicago Sweeper (Submachine Gun)",
+        "damage_multiplier": 1800,
+        "tier": "high"
+      },
+      {
+        "name": "Killer7 (Laser-Sighted Magnum)",
+        "damage_multiplier": 2200,
+        "tier": "high"
+      }
+    ],
+    "mid_tier": [
+      {
+        "name": "Riot Shotgun",
+        "damage_multiplier": 1200,
+        "tier": "mid"
+      },
+      {
+        "name": "W-870 Shotgun",
+        "damage_multiplier": 1000,
+        "tier": "mid"
+      },
+      {
+        "name": "LE 5 (Submachine Gun)",
+        "damage_multiplier": 900,
+        "tier": "mid"
+      },
+      {
+        "name": "Stingray (Semi-Auto Rifle)",
+        "damage_multiplier": 1100,
+        "tier": "mid"
+      },
+      {
+        "name": "CQBR Assault Rifle",
+        "damage_multiplier": 1300,
+        "tier": "mid"
+      }
+    ],
+    "low_tier": [
+      {
+        "name": "Silver Ghost (9mm Handgun)",
+        "damage_multiplier": 400,
+        "tier": "low"
+      },
+      {
+        "name": "Red9 (High-Power Handgun)",
+        "damage_multiplier": 600,
+        "tier": "low"
+      },
+      {
+        "name": "Punisher (Piercing Handgun)",
+        "damage_multiplier": 350,
+        "tier": "low"
+      },
+      {
+        "name": "Matilda (Burst Handgun)",
+        "damage_multiplier": 450,
+        "tier": "low"
+      },
+      {
+        "name": "Primal Knife",
+        "damage_multiplier": 200,
+        "tier": "low"
+      }
+    ]
+  },
+  "users": {
+    "862948496440819772": {
+      "pesetas": 0,
+      "current_weapons": [],
+      "quarantine_pass": false
+    }
+  }
+}
