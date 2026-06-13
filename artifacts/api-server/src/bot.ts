@@ -933,6 +933,16 @@ function buildServerGuideEmbed(): EmbedBuilder {
           "> **`!info @mention`**\n" +
           "> View any player's server join date, active roles, viewing permission status, wallet balance, and weapon inventory.",
         inline: false,
+      },
+      {
+        name: "🎫 SUPPORT & REPORTS",
+        value:
+          "> Need help, want to report a player, or have a suggestion? Head to <#" + TICKET_PANEL_CHANNEL_ID + "> and open a ticket.\n" +
+          "> **Bug Report** — something broken in the bot or server.\n" +
+          "> **Player Report** — report rule-breaking behaviour with evidence.\n" +
+          "> **Idea / Suggestion** — pitch a feature or improvement.\n" +
+          "> A private channel is created instantly — only you and staff can see it. Click **🔒 Close Ticket** when done.",
+        inline: false,
       }
     )
     .setFooter({ text: "RESIDENT EVIL COMMUNITY — UMBRELLA CORPORATION INTEL DIVISION" })
