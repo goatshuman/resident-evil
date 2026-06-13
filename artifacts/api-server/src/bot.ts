@@ -123,6 +123,14 @@ const BOSS_SPAWN_ALLOWED_IDS = new Set(["774943684646666260", "86294849644081977
 
 // ── News feeds ───────────────────────────────────────────────────────────────
 const NEWS_FEEDS = [
+  // Google News dynamic search — always fresh, largest pool
+  "https://news.google.com/rss/search?q=resident+evil&hl=en-US&gl=US&ceid=US:en",
+  "https://news.google.com/rss/search?q=resident+evil+capcom&hl=en-US&gl=US&ceid=US:en",
+  // Reddit communities
+  "https://www.reddit.com/r/residentevil/.rss",
+  "https://www.reddit.com/r/residentevil4/.rss",
+  "https://www.reddit.com/r/REBHFun/.rss",
+  // Gaming outlets
   "https://www.eurogamer.net/rss",
   "https://feeds.ign.com/ign/news",
   "https://www.gamesradar.com/rss/",
@@ -132,6 +140,9 @@ const NEWS_FEEDS = [
   "https://www.gameinformer.com/rss.xml",
   "https://www.polygon.com/rss/index.xml",
 ];
+
+// Posted URLs expire after this many days so the pool never runs fully dry
+const POSTED_URL_EXPIRY_DAYS = 30;
 
 const NEWS_KEYWORDS = /resident evil|biohazard|re4|re2|re3|re village|re:?4|re:?2|re:?3|capcom survival|ashley|leon kennedy|claire redfield|ada wong|umbrella corp/i;
 
@@ -704,17 +715,49 @@ const client = new Client({
 // ============================================================
 // JSON HELPERS
 // ============================================================
+interface PostedEntry { url: string; ts: number; }
+
 function loadPostedUrls(): Set<string> {
   try {
-    if (fs.existsSync(POSTED_URLS_FILE)) {
-      return new Set(JSON.parse(fs.readFileSync(POSTED_URLS_FILE, "utf8")));
+    if (!fs.existsSync(POSTED_URLS_FILE)) return new Set();
+    const raw = JSON.parse(fs.readFileSync(POSTED_URLS_FILE, "utf8"));
+    const cutoff = Date.now() - POSTED_URL_EXPIRY_DAYS * 86_400_000;
+    // Support both old format (string[]) and new format (PostedEntry[])
+    const entries: PostedEntry[] = Array.isArray(raw)
+      ? raw.map((x: string | PostedEntry) =>
+          typeof x === "string" ? { url: x, ts: Date.now() } : x
+        )
+      : [];
+    const fresh = entries.filter((e) => e.ts >= cutoff);
+    // Persist immediately if we pruned stale entries
+    if (fresh.length < entries.length) {
+      fs.writeFileSync(POSTED_URLS_FILE, JSON.stringify(fresh), "utf8");
     }
+    return new Set(fresh.map((e) => e.url));
   } catch {}
   return new Set();
 }
 
 function savePostedUrls(urls: Set<string>) {
-  fs.writeFileSync(POSTED_URLS_FILE, JSON.stringify([...urls]), "utf8");
+  // Load existing entries so we preserve timestamps from before this session
+  let existing: PostedEntry[] = [];
+  try {
+    if (fs.existsSync(POSTED_URLS_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(POSTED_URLS_FILE, "utf8"));
+      existing = Array.isArray(raw)
+        ? raw.map((x: string | PostedEntry) =>
+            typeof x === "string" ? { url: x, ts: Date.now() } : x
+          )
+        : [];
+    }
+  } catch {}
+  const existingMap = new Map(existing.map((e) => [e.url, e.ts]));
+  const now = Date.now();
+  const merged: PostedEntry[] = [...urls].map((url) => ({
+    url,
+    ts: existingMap.get(url) ?? now,
+  }));
+  fs.writeFileSync(POSTED_URLS_FILE, JSON.stringify(merged), "utf8");
 }
 
 function normalizeUrl(url: string): string {
@@ -1266,6 +1309,12 @@ async function fetchAndBroadcastNews() {
   }
 
   if (!allItems.length) { console.log("[News] No RE articles found."); return; }
+
+  // Shuffle so different sources surface each time, not always the same feed first
+  for (let i = allItems.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [allItems[i], allItems[j]] = [allItems[j], allItems[i]];
+  }
 
   let posted = 0;
   for (const item of allItems) {
