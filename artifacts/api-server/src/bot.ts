@@ -125,7 +125,15 @@ const BOSS_SPAWN_ALLOWED_IDS = new Set(["774943684646666260", "86294849644081977
 const NEWS_FEEDS = [
   "https://www.eurogamer.net/rss",
   "https://feeds.ign.com/ign/news",
+  "https://www.gamesradar.com/rss/",
+  "https://kotaku.com/rss",
+  "https://www.destructoid.com/feed/",
+  "https://www.vg247.com/feed",
+  "https://www.gameinformer.com/rss.xml",
+  "https://www.polygon.com/rss/index.xml",
 ];
+
+const NEWS_KEYWORDS = /resident evil|biohazard|re4|re2|re3|re village|re:?4|re:?2|re:?3|capcom survival|ashley|leon kennedy|claire redfield|ada wong|umbrella corp/i;
 
 // ============================================================
 // MERCHANT WEAPON MASTER POOL
@@ -1244,7 +1252,7 @@ async function fetchAndBroadcastNews() {
   const allItems: RssItem[] = [];
   for (const feedUrl of NEWS_FEEDS) {
     const items = await fetchFeedItems(feedUrl);
-    allItems.push(...items.filter((i) => /resident evil/i.test(i.title || "")));
+    allItems.push(...items.filter((i) => NEWS_KEYWORDS.test(i.title || "") || NEWS_KEYWORDS.test(i.description || "")));
   }
 
   if (!allItems.length) { console.log("[News] No RE articles found."); return; }
@@ -1950,6 +1958,12 @@ client.on("messageCreate", async (message: Message) => {
       await message.delete().catch(() => {});
       console.log(`[News] Manual fetch triggered by ${message.author.tag}`);
       await fetchAndBroadcastNews();
+      return;
+    }
+    if (message.content === "!clearnews") {
+      await message.delete().catch(() => {});
+      savePostedUrls(new Set());
+      console.log(`[News] Posted-URL history cleared by ${message.author.tag}`);
       return;
     }
   }

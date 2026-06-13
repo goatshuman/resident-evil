@@ -79,9 +79,10 @@
   },
   "users": {
     "862948496440819772": {
-      "pesetas": 0,
+      "pesetas": 7,
       "current_weapons": [],
-      "quarantine_pass": false
+      "quarantine_pass": false,
+      "_lastEarnTime": 1781354193051
     }
   }
 }
