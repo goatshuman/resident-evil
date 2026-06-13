@@ -491,6 +491,19 @@ async function spawnBoss(guild: Guild) {
       type: ChannelType.GuildText,
       parent: BOSS_CATEGORY_ID,
       reason: `Boss fight: ${bossName}`,
+      permissionOverwrites: [
+        // Lock out everyone by default
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+        // Only Boss Fight role holders can see and chat in the arena
+        {
+          id: BOSS_FIGHT_ROLE_ID,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory,
+          ],
+        },
+      ],
     }) as TextChannel;
   } catch (err) {
     console.error("[Boss] Failed to create boss channel:", err);
@@ -509,18 +522,20 @@ async function spawnBoss(guild: Guild) {
     timer: null,
   };
 
-  // Assign Boss Fight Role to ALL Survivor members and strip Survivor role during the fight
+  // Assign Boss Fight Role to ALL non-bot, non-Dead members and strip Survivor role for the fight.
+  // We do NOT filter by Survivor role here — members who joined before the bot was live
+  // may not have Survivor yet, and we still want them to participate.
   try {
     const freshMembers = await guild.members.fetch();
     let assigned = 0;
     for (const [, member] of freshMembers) {
       if (member.user.bot) continue;
-      if (!member.roles.cache.has(SURVIVOR_ROLE_ID)) continue;
+      if (member.roles.cache.has(DEAD_ROLE_ID)) continue; // quarantined players sit out
       await member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight started").catch(() => {});
       await member.roles.add(BOSS_FIGHT_ROLE_ID, "Boss fight initiated").catch(() => {});
       assigned++;
     }
-    console.log(`[Boss] Boss Fight Role assigned to ${assigned} Survivor(s). Survivor role removed during fight.`);
+    console.log(`[Boss] Boss Fight Role assigned to ${assigned} member(s). Survivor role removed during fight.`);
   } catch (err) {
     console.error("[Boss] Failed to assign boss fight roles:", err);
   }
@@ -1588,6 +1603,24 @@ client.once("ready", async () => {
     }
     if (timers.length) console.log(`[Boss] Resumed ${timers.length} pending quarantine timer(s).`);
     scheduleNextBossSpawn(guild);
+
+    // Auto-assign Survivor role to any member who has no game role yet.
+    // This primes existing members who joined before the bot was deployed.
+    try {
+      const allMembers = await guild.members.fetch();
+      let primed = 0;
+      for (const [, member] of allMembers) {
+        if (member.user.bot) continue;
+        if (member.roles.cache.has(SURVIVOR_ROLE_ID)) continue;
+        if (member.roles.cache.has(DEAD_ROLE_ID)) continue;
+        if (member.roles.cache.has(BOSS_FIGHT_ROLE_ID)) continue;
+        await member.roles.add(SURVIVOR_ROLE_ID, "Startup: prime existing members with Survivor role").catch(() => {});
+        primed++;
+      }
+      if (primed > 0) console.log(`[Startup] Assigned Survivor role to ${primed} existing member(s).`);
+    } catch (err) {
+      console.error("[Startup] Failed to prime Survivor roles:", err);
+    }
   }
 
   // News runs on interval only — NOT on startup — to prevent repeat broadcasts on restart
