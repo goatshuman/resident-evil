@@ -31,4 +31,9 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
+app.get("/", (_req, res) => {
+  res.setHeader("Content-Type", "text/plain");
+  res.send("I'm alive!");
+});
+
 export default app;
