@@ -793,11 +793,14 @@ function getTotals(votes: Record<string, string[]>, roster: string[]): Record<st
   return totals;
 }
 
-function loadPersistentMsgId(file: string): string | null {
+function loadPersistentMsgId(file: string, fallback?: string): string | null {
   try {
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, "utf8"));
+    if (fs.existsSync(file)) {
+      const val = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (val) return val;
+    }
   } catch {}
-  return null;
+  return fallback ?? null;
 }
 
 function savePersistentMsgId(file: string, id: string) {
@@ -992,7 +995,7 @@ function buildServerGuideEmbed(): EmbedBuilder {
 
 async function updateServerGuide() {
   const embed = buildServerGuideEmbed();
-  const existingId = loadPersistentMsgId(SERVER_GUIDE_MSG_ID_FILE);
+  const existingId = loadPersistentMsgId(SERVER_GUIDE_MSG_ID_FILE, "1515332347707265236");
 
   if (existingId) {
     try {
@@ -1084,7 +1087,7 @@ async function updateWeaponInfo() {
   console.log("[WeaponInfo] Action Taken: Generating static Weapon & Ammo reference list → Target: Channel ID 1515246349363449896 | Design: Embed Color #4A154B / Printing Drop Chances and Stats");
 
   const embeds = buildWeaponInfoEmbeds();
-  const existingId = loadPersistentMsgId(WEAPON_INFO_MSG_ID_FILE);
+  const existingId = loadPersistentMsgId(WEAPON_INFO_MSG_ID_FILE, "1515328961817608345");
 
   if (existingId) {
     try {
@@ -1142,7 +1145,7 @@ async function updatePesetasLeaderboard() {
     .slice(0, 10);
 
   const embed = buildPesetasLeaderboardEmbed(sorted);
-  const existingId = loadPersistentMsgId(PESETAS_LB_MSG_ID_FILE);
+  const existingId = loadPersistentMsgId(PESETAS_LB_MSG_ID_FILE, "1515326464088866927");
 
   if (existingId) {
     try {
@@ -1363,7 +1366,7 @@ async function fetchAndBroadcastNews() {
 // PERSISTENT EMBED HELPERS
 // ============================================================
 async function updateHoneypotWarning() {
-  const existingId = loadPersistentMsgId(HONEYPOT_MSG_ID_FILE);
+  const existingId = loadPersistentMsgId(HONEYPOT_MSG_ID_FILE, "1515362757900505138");
   const embed = buildHoneypotEmbed();
   const files = [new AttachmentBuilder(HONEYPOT_BEAR_TRAP_PATH, { name: "bear-trap.png" })];
 
@@ -1391,7 +1394,7 @@ async function updateHoneypotWarning() {
 }
 
 async function updateBypassShop() {
-  const existingId = loadPersistentMsgId(BYPASS_MSG_ID_FILE);
+  const existingId = loadPersistentMsgId(BYPASS_MSG_ID_FILE, "1515328963113652368");
   const embed = buildBypassShopEmbed();
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId("buy_bypass").setLabel("🔓 Use Bypass Pass").setStyle(ButtonStyle.Success)
@@ -1518,7 +1521,7 @@ function buildTicketCloseRow(): ActionRowBuilder<ButtonBuilder> {
 async function updateTicketPanel() {
   const embed = buildTicketPanelEmbed();
   const row = buildTicketSelectRow();
-  const existingId = loadPersistentMsgId(TICKET_PANEL_MSG_ID_FILE);
+  const existingId = loadPersistentMsgId(TICKET_PANEL_MSG_ID_FILE, "1515331419117719713");
 
   if (existingId) {
     try {
