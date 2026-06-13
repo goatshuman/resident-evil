@@ -1143,7 +1143,7 @@ async function editExistingMessage(
     if (!channel || typeof (channel as any).messages !== "object") return;
     const msg = await (channel as TextChannel).messages.fetch(msgId);
     if (!msg) return;
-    const payload: any = { embeds: [embed], components: rows };
+    const payload: any = { embeds: [embed], components: rows, attachments: [] };
     if (files?.length) payload.files = files;
     await msg.edit(payload);
     console.log(`[Edit] Updated message ${msgId} in channel ${channelId}.`);
