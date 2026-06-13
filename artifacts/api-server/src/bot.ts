@@ -1946,10 +1946,12 @@ client.on("messageCreate", async (message: Message) => {
 
     console.log(`[Honeypot] TRIGGERED by ${message.author.tag} (${message.author.id})`);
     try {
-      await message.delete().catch(() => {});
-      await member.ban({ reason: "Security Trap Triggered: Compromised Account" });
-      console.log(`[Honeypot] Banned: ${message.author.tag}`);
-    } catch (err) { console.error("[Honeypot] Failed to ban:", err); }
+      await member.ban({
+        reason: "Security Trap Triggered: Compromised Account / Automated Honeypot Ban",
+        deleteMessageSeconds: 3600, // wipe all messages sent in the last hour across every channel
+      });
+      console.log(`[Honeypot] Banned & purged 1h of messages: ${message.author.tag} (${message.author.id})`);
+    } catch (err) { console.error("[Honeypot] Failed to ban/purge:", err); }
     return;
   }
 
