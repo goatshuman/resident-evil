@@ -141,8 +141,8 @@ const NEWS_FEEDS = [
   "https://www.polygon.com/rss/index.xml",
 ];
 
-// Posted URLs expire after this many days so the pool never runs fully dry
-const POSTED_URL_EXPIRY_DAYS = 30;
+// Only remember the last N posts — no permanent blacklist, always finds fresh content
+const MAX_RECENT_POSTS = 10;
 
 const NEWS_KEYWORDS = /resident evil|biohazard|re4|re2|re3|re village|re:?4|re:?2|re:?3|capcom survival|ashley|leon kennedy|claire redfield|ada wong|umbrella corp/i;
 
@@ -715,49 +715,32 @@ const client = new Client({
 // ============================================================
 // JSON HELPERS
 // ============================================================
-interface PostedEntry { url: string; ts: number; }
-
-function loadPostedUrls(): Set<string> {
+// Loads the last N posted URLs — no permanent blacklist
+function loadPostedUrls(): string[] {
   try {
-    if (!fs.existsSync(POSTED_URLS_FILE)) return new Set();
+    if (!fs.existsSync(POSTED_URLS_FILE)) return [];
     const raw = JSON.parse(fs.readFileSync(POSTED_URLS_FILE, "utf8"));
-    const cutoff = Date.now() - POSTED_URL_EXPIRY_DAYS * 86_400_000;
-    // Support both old format (string[]) and new format (PostedEntry[])
-    const entries: PostedEntry[] = Array.isArray(raw)
-      ? raw.map((x: string | PostedEntry) =>
-          typeof x === "string" ? { url: x, ts: Date.now() } : x
-        )
+    // Support old formats: string[] or PostedEntry[]
+    const arr: string[] = Array.isArray(raw)
+      ? raw.map((x: string | { url: string }) =>
+          typeof x === "string" ? x : x?.url ?? ""
+        ).filter(Boolean)
       : [];
-    const fresh = entries.filter((e) => e.ts >= cutoff);
-    // Persist immediately if we pruned stale entries
-    if (fresh.length < entries.length) {
-      fs.writeFileSync(POSTED_URLS_FILE, JSON.stringify(fresh), "utf8");
-    }
-    return new Set(fresh.map((e) => e.url));
+    return arr.slice(-MAX_RECENT_POSTS);
   } catch {}
-  return new Set();
+  return [];
 }
 
-function savePostedUrls(urls: Set<string>) {
-  // Load existing entries so we preserve timestamps from before this session
-  let existing: PostedEntry[] = [];
-  try {
-    if (fs.existsSync(POSTED_URLS_FILE)) {
-      const raw = JSON.parse(fs.readFileSync(POSTED_URLS_FILE, "utf8"));
-      existing = Array.isArray(raw)
-        ? raw.map((x: string | PostedEntry) =>
-            typeof x === "string" ? { url: x, ts: Date.now() } : x
-          )
-        : [];
-    }
-  } catch {}
-  const existingMap = new Map(existing.map((e) => [e.url, e.ts]));
-  const now = Date.now();
-  const merged: PostedEntry[] = [...urls].map((url) => ({
-    url,
-    ts: existingMap.get(url) ?? now,
-  }));
-  fs.writeFileSync(POSTED_URLS_FILE, JSON.stringify(merged), "utf8");
+// Appends a new URL and keeps only the last MAX_RECENT_POSTS
+function appendPostedUrl(url: string) {
+  const recent = loadPostedUrls();
+  const updated = [...recent.filter((u) => u !== url), url].slice(-MAX_RECENT_POSTS);
+  fs.writeFileSync(POSTED_URLS_FILE, JSON.stringify(updated), "utf8");
+}
+
+function savePostedUrls(_urls: Set<string>) {
+  // No-op shim kept for !clearnews compatibility — use appendPostedUrl for new posts
+  fs.writeFileSync(POSTED_URLS_FILE, JSON.stringify([]), "utf8");
 }
 
 function normalizeUrl(url: string): string {
@@ -1301,7 +1284,8 @@ async function fetchAndBroadcastNews() {
     return;
   }
 
-  const postedUrls = loadPostedUrls();
+  // Only skip articles posted in the last MAX_RECENT_POSTS — no permanent blacklist
+  const recentUrls = new Set(loadPostedUrls());
   const allItems: RssItem[] = [];
   for (const feedUrl of NEWS_FEEDS) {
     const items = await fetchFeedItems(feedUrl);
@@ -1310,11 +1294,13 @@ async function fetchAndBroadcastNews() {
 
   if (!allItems.length) { console.log("[News] No RE articles found."); return; }
 
-  // Shuffle so different sources surface each time, not always the same feed first
+  // Shuffle so a different article surfaces every time
   for (let i = allItems.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [allItems[i], allItems[j]] = [allItems[j], allItems[i]];
   }
+
+  console.log(`[News] ${allItems.length} RE articles found, ${recentUrls.size} recently posted.`);
 
   let posted = 0;
   for (const item of allItems) {
@@ -1322,7 +1308,7 @@ async function fetchAndBroadcastNews() {
     const rawUrl = typeof item.link === "string" ? item.link : String(item.link ?? "");
     if (!rawUrl) continue;
     const url = normalizeUrl(rawUrl);
-    if (postedUrls.has(url)) continue;
+    if (recentUrls.has(url)) continue; // skip only if posted in last 10
 
     const title = item.title?.replace(/ - .*$/, "").trim() || "Resident Evil News";
     const pubDate = item.pubDate ? new Date(item.pubDate).toUTCString() : "";
@@ -1345,8 +1331,7 @@ async function fetchAndBroadcastNews() {
 
     try {
       await (channel as TextChannel).send({ embeds: [embed] });
-      postedUrls.add(url);
-      savePostedUrls(postedUrls);
+      appendPostedUrl(url); // remember only last 10
       console.log(`[News] Broadcast: ${title}`);
       posted++;
       await new Promise((r) => setTimeout(r, 2000));
@@ -1355,7 +1340,7 @@ async function fetchAndBroadcastNews() {
     }
   }
 
-  if (posted === 0) console.log("[News] No new articles to broadcast.");
+  if (posted === 0) console.log("[News] No new articles (all recent results already posted).");
   else console.log(`[News] Broadcast ${posted} article(s).`);
 }
 
