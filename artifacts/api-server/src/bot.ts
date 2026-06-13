@@ -333,6 +333,7 @@ interface BossState {
   maxHp: number;
   guildId: string;
   participants: Set<string>;
+  participantBestDamage: Map<string, number>;
   ended: boolean;
   timer: NodeJS.Timeout | null;
 }
@@ -425,7 +426,7 @@ async function ensureWeaponRoles(guild: Guild) {
 }
 
 // ── Determine tier distribution of a set of guild members ────────────────────
-function detectRoomTier(members: Collection<string, GuildMember>): "high" | "mid" | "low" {
+function detectRoomTier(members: Collection<string, GuildMember>): "high" | "mid" | "low" | "none" {
   let highCount = 0, midCount = 0, lowCount = 0;
   for (const [, member] of members) {
     if (member.user.bot) continue;
@@ -437,9 +438,10 @@ function detectRoomTier(members: Collection<string, GuildMember>): "high" | "mid
       if (t === "low")  { lowCount++;  break; }
     }
   }
-  if (highCount > 0)          return "high";
-  if (midCount >= lowCount)   return "mid";
-  return "low";
+  if (highCount > 0)                        return "high";
+  if (midCount > 0 && midCount >= lowCount) return "mid";
+  if (lowCount > 0)                         return "low";
+  return "none";
 }
 
 async function spawnBoss(guild: Guild) {
@@ -457,9 +459,9 @@ async function spawnBoss(guild: Guild) {
   try { members = await guild.members.fetch(); } catch { members = guild.members.cache; }
   const survivorMembers = members.filter((m) => !m.user.bot && m.roles.cache.has(SURVIVOR_ROLE_ID));
   const roomTier = detectRoomTier(survivorMembers);
-  const scaleMap = { high: 1.0, mid: 0.50, low: 0.15 };
-  const scaleFactor = scaleMap[roomTier];
-  const maxHp = Math.max(500, Math.round(rawMaxHp * scaleFactor));
+  const scaleMap: Record<string, number> = { high: 1.0, mid: 0.50, low: 0.15, none: 0.04 };
+  const scaleFactor = scaleMap[roomTier] ?? 0.04;
+  const maxHp = Math.max(200, Math.round(rawMaxHp * scaleFactor));
   console.log(`[Boss] Modifier Applied: Room tier="${roomTier}" → scaled HP ${rawMaxHp.toLocaleString()} × ${scaleFactor} = ${maxHp.toLocaleString()}`);
   const channelName = bossName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 
@@ -483,24 +485,23 @@ async function spawnBoss(guild: Guild) {
     maxHp,
     guildId: guild.id,
     participants: new Set(),
+    participantBestDamage: new Map(),
     ended: false,
     timer: null,
   };
 
-  // Assign Boss Fight Role only to Survivor members who are currently ONLINE
-  // (idle, DND, and offline members are excluded — they won't be quarantined)
+  // Assign Boss Fight Role to ALL Survivor members and strip Survivor role during the fight
   try {
-    const members = await guild.members.fetch({ withPresences: true });
+    const freshMembers = await guild.members.fetch();
     let assigned = 0;
-    for (const [, member] of members) {
+    for (const [, member] of freshMembers) {
       if (member.user.bot) continue;
       if (!member.roles.cache.has(SURVIVOR_ROLE_ID)) continue;
-      const status = member.presence?.status;
-      if (status !== "online") continue;      // skip idle / dnd / offline
+      await member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight started").catch(() => {});
       await member.roles.add(BOSS_FIGHT_ROLE_ID, "Boss fight initiated").catch(() => {});
       assigned++;
     }
-    console.log(`[Boss] Boss Fight Role assigned to ${assigned} online Survivor(s).`);
+    console.log(`[Boss] Boss Fight Role assigned to ${assigned} Survivor(s). Survivor role removed during fight.`);
   } catch (err) {
     console.error("[Boss] Failed to assign boss fight roles:", err);
   }
@@ -526,30 +527,38 @@ async function spawnBoss(guild: Guild) {
   }, BOSS_FIGHT_DURATION_MS);
 }
 
+function calcBossReward(bestDamage: number): number {
+  if (bestDamage >= 1301) return randInt(100000, 200000); // high tier
+  if (bestDamage >= 601)  return randInt(50000,  100000); // mid tier
+  if (bestDamage >= 51)   return randInt(15000,  50000);  // low tier
+  return randInt(5000, 15000);                            // base (no weapon)
+}
+
 async function bossVictory(guild: Guild) {
   if (!activeBoss || activeBoss.ended) return;
   activeBoss.ended = true;
   if (activeBoss.timer) clearTimeout(activeBoss.timer);
 
-  const { bossName, channelId, participants } = activeBoss;
+  const { bossName, channelId, participants, participantBestDamage } = activeBoss;
   activeBoss = null;
 
-  // Award Pesetas — max 200k split across participants
-  const rewardEach = participants.size > 0
-    ? Math.min(200000, Math.floor(200000 / participants.size))
-    : 0;
+  // Award Pesetas scaled by each participant's best weapon damage
   for (const userId of participants) {
+    const bestDamage = participantBestDamage.get(userId) ?? 50;
+    const reward = calcBossReward(bestDamage);
     const profile = loadUserProfile(userId);
-    profile.pesetas += rewardEach;
+    profile.pesetas += reward;
     saveUserProfile(userId, profile);
+    console.log(`[Boss] Rewarded ${userId}: ${reward.toLocaleString()} Pesetas (best damage: ${bestDamage})`);
   }
 
-  // Strip Boss Fight Role from all holders
+  // Strip Boss Fight Role and restore Survivor Role for all holders
   try {
     const members = await guild.members.fetch();
     for (const [, member] of members) {
       if (member.roles.cache.has(BOSS_FIGHT_ROLE_ID)) {
         await member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: victory").catch(() => {});
+        await member.roles.add(SURVIVOR_ROLE_ID, "Boss fight ended: victory — restored").catch(() => {});
       }
     }
   } catch {}
@@ -560,7 +569,7 @@ async function bossVictory(guild: Guild) {
     if (ch) await ch.delete("Boss fight ended: victory");
   } catch {}
 
-  console.log(`[Boss] VICTORY: ${bossName} defeated. ${participants.size} players rewarded ${rewardEach.toLocaleString()} Pesetas each.`);
+  console.log(`[Boss] VICTORY: ${bossName} defeated. ${participants.size} player(s) rewarded (tiered Pesetas).`);
   updateBotPresence();
 }
 
@@ -1769,6 +1778,8 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
     activeBoss.hp = Math.max(0, activeBoss.hp - damage);
     activeBoss.participants.add(user.id);
+    const prevBest = activeBoss.participantBestDamage.get(user.id) ?? 0;
+    if (damage > prevBest) activeBoss.participantBestDamage.set(user.id, damage);
 
     const bossName = activeBoss.bossName;
     const hp = activeBoss.hp;
