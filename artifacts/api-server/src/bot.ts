@@ -1944,6 +1944,16 @@ client.on("messageCreate", async (message: Message) => {
     return;
   }
 
+  // Owner-only commands
+  if (BOSS_SPAWN_ALLOWED_IDS.has(message.author.id)) {
+    if (message.content === "!fetchnews") {
+      await message.delete().catch(() => {});
+      console.log(`[News] Manual fetch triggered by ${message.author.tag}`);
+      await fetchAndBroadcastNews();
+      return;
+    }
+  }
+
   // Boss commands — only allowed for the two owner IDs
   if (BOSS_SPAWN_ALLOWED_IDS.has(message.author.id)) {
     if (message.content === "!bossspawn") {
