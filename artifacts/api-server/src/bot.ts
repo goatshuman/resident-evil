@@ -523,19 +523,24 @@ async function spawnBoss(guild: Guild) {
   };
 
   // Assign Boss Fight Role to ALL non-bot, non-Dead members and strip Survivor role for the fight.
-  // We do NOT filter by Survivor role here — members who joined before the bot was live
-  // may not have Survivor yet, and we still want them to participate.
+  // Uses Promise.all for parallel execution — sequential awaits can exceed Discord's rate-limit
+  // window or the boss timer itself when there are many members.
   try {
     const freshMembers = await guild.members.fetch();
-    let assigned = 0;
-    for (const [, member] of freshMembers) {
-      if (member.user.bot) continue;
-      if (member.roles.cache.has(DEAD_ROLE_ID)) continue; // quarantined players sit out
-      await member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight started").catch(() => {});
-      await member.roles.add(BOSS_FIGHT_ROLE_ID, "Boss fight initiated").catch(() => {});
-      assigned++;
-    }
-    console.log(`[Boss] Boss Fight Role assigned to ${assigned} member(s). Survivor role removed during fight.`);
+    const eligible = Array.from(freshMembers.values()).filter(
+      (m) => !m.user.bot && !m.roles.cache.has(DEAD_ROLE_ID)
+    );
+    await Promise.all(
+      eligible.flatMap((member) => [
+        member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight started").catch((err) =>
+          console.error(`[Boss] Remove Survivor failed for ${member.user.tag}:`, err)
+        ),
+        member.roles.add(BOSS_FIGHT_ROLE_ID, "Boss fight initiated").catch((err) =>
+          console.error(`[Boss] Add BossFight failed for ${member.user.tag}:`, err)
+        ),
+      ])
+    );
+    console.log(`[Boss] Boss Fight Role assigned to ${eligible.length} member(s). Survivor role removed during fight.`);
   } catch (err) {
     console.error("[Boss] Failed to assign boss fight roles:", err);
   }
@@ -589,13 +594,18 @@ async function bossVictory(guild: Guild) {
   // Strip Boss Fight Role and restore Survivor Role for all holders
   try {
     const members = await guild.members.fetch();
-    for (const [, member] of members) {
-      if (member.roles.cache.has(BOSS_FIGHT_ROLE_ID)) {
-        await member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: victory").catch(() => {});
-        await member.roles.add(SURVIVOR_ROLE_ID, "Boss fight ended: victory — restored").catch(() => {});
-      }
-    }
-  } catch {}
+    const fighters = Array.from(members.values()).filter((m) => m.roles.cache.has(BOSS_FIGHT_ROLE_ID));
+    await Promise.all(
+      fighters.flatMap((member) => [
+        member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: victory").catch((err) =>
+          console.error(`[Boss] Victory remove BossFight failed for ${member.user.tag}:`, err)
+        ),
+        member.roles.add(SURVIVOR_ROLE_ID, "Boss fight ended: victory — restored").catch((err) =>
+          console.error(`[Boss] Victory restore Survivor failed for ${member.user.tag}:`, err)
+        ),
+      ])
+    );
+  } catch (err) { console.error("[Boss] Victory role cleanup failed:", err); }
 
   // Delete boss channel
   try {
@@ -620,19 +630,30 @@ async function bossDefeat(guild: Guild, _reason: "timeout" | "admin") {
   // Strip Boss Fight Role + Survivor Role, assign Dead Role to all boss fight role holders
   try {
     const members = await guild.members.fetch();
-    for (const [memberId, member] of members) {
-      if (!member.roles.cache.has(BOSS_FIGHT_ROLE_ID)) continue;
-      await member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: defeat").catch(() => {});
-      await member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight defeat").catch(() => {});
-      await member.roles.add(DEAD_ROLE_ID, "Boss fight defeat").catch(() => {});
+    const fighters = Array.from(members.entries()).filter(([, m]) => m.roles.cache.has(BOSS_FIGHT_ROLE_ID));
 
-      const now = Date.now();
+    // Record timers first (synchronous), then run all role changes in parallel
+    const now = Date.now();
+    for (const [memberId] of fighters) {
       const existing = deadTimers.findIndex((t) => t.userId === memberId);
       if (existing >= 0) deadTimers[existing].assignedAt = now;
       else deadTimers.push({ userId: memberId, assignedAt: now });
-
       scheduleDeadRoleRelease(guild, memberId, now);
     }
+
+    await Promise.all(
+      fighters.flatMap(([, member]) => [
+        member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: defeat").catch((err) =>
+          console.error(`[Boss] Defeat remove BossFight failed for ${member.user.tag}:`, err)
+        ),
+        member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight defeat").catch((err) =>
+          console.error(`[Boss] Defeat remove Survivor failed for ${member.user.tag}:`, err)
+        ),
+        member.roles.add(DEAD_ROLE_ID, "Boss fight defeat").catch((err) =>
+          console.error(`[Boss] Defeat add Dead failed for ${member.user.tag}:`, err)
+        ),
+      ])
+    );
   } catch (err) {
     console.error("[Boss] Failed to assign dead roles:", err);
   }
@@ -1266,15 +1287,24 @@ interface RssItem {
 }
 
 function extractRssImage(item: RssItem): string | null {
+  // 1. media:content (most reliable)
   const mc = item["media:content"];
   if (mc) {
     if (Array.isArray(mc)) { const url = mc[0]?.["@_url"]; if (url?.startsWith("http")) return url; }
     else { const url = (mc as { "@_url"?: string })["@_url"]; if (url?.startsWith("http")) return url; }
   }
+  // 2. media:thumbnail
   const mt = item["media:thumbnail"]?.["@_url"];
   if (mt?.startsWith("http")) return mt;
+  // 3. enclosure (podcasts / image enclosures)
   const enc = item.enclosure?.["@_url"];
   if (enc?.startsWith("http")) return enc;
+  // 4. <img src="..."> embedded in HTML description (Reddit RSS, many gaming feeds)
+  const desc = String(item.description ?? "");
+  if (desc) {
+    const m = desc.match(/<img[^>]+src=["']([^"']+)["']/i);
+    if (m?.[1]?.startsWith("http")) return m[1];
+  }
   return null;
 }
 
