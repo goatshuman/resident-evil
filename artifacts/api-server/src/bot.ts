@@ -883,40 +883,195 @@ function saveYtPostedIds(ids: string[]) {
   fs.writeFileSync(YT_POSTED_VIDEO_IDS_FILE, JSON.stringify(last50), "utf8");
 }
 
+async function fetchCommunityPosts(channelId: string): Promise<{ id: string; url: string; text: string; thumb: string | null }[]> {
+  try {
+    const url = `https://www.youtube.com/channel/${channelId}/community`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+    const text = await res.text();
+
+    // Find the ytInitialData JSON object
+    const match = text.match(/var ytInitialData = ({.+?});/);
+    if (!match) return [];
+    const data = JSON.parse(match[1]) as any;
+
+    const posts = [] as { id: string; url: string; text: string; thumb: string | null }[];
+    const tabs = data?.contents?.twoColumnBrowseResultsRenderer?.tabs ?? [];
+    for (const tab of tabs) {
+      const items = tab?.tabRenderer?.content?.sectionListRenderer?.contents ?? [];
+      for (const item of items) {
+        const postItems = item?.itemSectionRenderer?.contents ?? [];
+        for (const post of postItems) {
+          const postContent = post?.backstagePostThreadRenderer?.post?.backstagePostRenderer;
+          if (!postContent) continue;
+          const postId = postContent?.postId ?? "";
+          const contentText = postContent?.contentText?.runs?.map((r: any) => r.text).join(" ") ?? "";
+          const thumbUrl = postContent?.backstageAttachment?.backstageImageRenderer?.image?.thumbnails?.[0]?.url ?? null;
+          posts.push({
+            id: postId,
+            url: `https://www.youtube.com/channel/${channelId}/community?lb=${postId}`,
+            text: contentText.slice(0, 400),
+            thumb: thumbUrl,
+          });
+        }
+      }
+    }
+    return posts;
+  } catch (err) {
+    console.error("[YT] Community scraper failed:", err);
+    return [];
+  }
+}
+
 async function pollYouTubeUploads() {
   const apiKey = process.env.YOUTUBE_API_KEY;
   if (!apiKey) {
     console.log("[YT] YOUTUBE_API_KEY not set; skipping poll.");
     return;
   }
-  if (!YOUTUBE_CHANNEL_ID) return;
+  if (!YOUTUBE_CHANNEL_ID) {
+    console.log("[YT] YOUTUBE_CHANNEL_ID not set; skipping poll.");
+    return;
+  }
+
+  console.log("[YT] Polling for new activities...");
 
   try {
-    // Activities API catches videos, shorts, live streams, and community posts
-    const url =
+    // ── Strategy 1: Activities API (videos, shorts, lives, community posts)
+    const activitiesUrl =
       `https://www.googleapis.com/youtube/v3/activities?part=snippet,contentDetails` +
       `&channelId=${YOUTUBE_CHANNEL_ID}&maxResults=10&key=${apiKey}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    const data = await res.json() as any;
+    const aRes = await fetch(activitiesUrl, { signal: AbortSignal.timeout(15_000) });
+    const aData = await aRes.json() as any;
 
-    if (data?.error) {
-      console.log("[YT] API error:", JSON.stringify(data.error));
-      return;
+    if (aData?.error) {
+      console.log("[YT] Activities API error:", JSON.stringify(aData.error));
+    }
+    const activityItems = aData?.items ?? [];
+    console.log(`[YT] Activities API returned ${activityItems.length} item(s).`);
+
+    // ── Strategy 2: Search API (backup for videos/shorts)
+    const searchUrl =
+      `https://www.googleapis.com/youtube/v3/search?part=snippet` +
+      `&channelId=${YOUTUBE_CHANNEL_ID}&maxResults=5&order=date` +
+      `&type=video&key=${apiKey}`;
+    const sRes = await fetch(searchUrl, { signal: AbortSignal.timeout(15_000) });
+    const sData = await sRes.json() as any;
+    const searchItems = sData?.items ?? [];
+    console.log(`[YT] Search API returned ${searchItems.length} item(s).`);
+
+    // ── Strategy 3: RSS Feed (backup for videos)
+    const rssUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${YOUTUBE_CHANNEL_ID}`;
+    const rssRes = await fetch(rssUrl, { signal: AbortSignal.timeout(10_000) });
+    const rssText = await rssRes.text();
+    const rssIds = [...rssText.matchAll(/<yt:videoId>([^<]+)<\/yt:videoId>/g)].map((m) => m[1]);
+    console.log(`[YT] RSS feed returned ${rssIds.length} video ID(s).`);
+
+    // ── Strategy 4: Community tab scraper (only way to get community posts)
+    const communityPosts = await fetchCommunityPosts(YOUTUBE_CHANNEL_ID);
+    console.log(`[YT] Community scraper returned ${communityPosts.length} post(s).`);
+
+    // ── Merge all sources, deduplicate ─────────────────────────────────────
+    const postedIds = loadYtPostedIds();
+    const newItems: { type: string; title: string; url: string; thumb: string | null; desc: string; author: string; published: string; key: string }[] = [];
+
+    // Activities
+    for (const it of activityItems) {
+      const s = it?.snippet;
+      const cd = it?.contentDetails;
+      const type = s?.type;
+      const publishedAt = s?.publishedAt;
+      const key = `act:${type}:${publishedAt}`;
+      if (postedIds.includes(key)) continue;
+      if (type !== "upload" && type !== "shortsUpload" && type !== "liveEvent" && type !== "post") continue;
+
+      const vidId = cd?.upload?.videoId ?? cd?.liveEvent?.videoId;
+      const url = type === "shortsUpload"
+        ? `https://www.youtube.com/shorts/${vidId}`
+        : type === "liveEvent"
+          ? `https://www.youtube.com/watch?v=${vidId}`
+          : type === "post"
+            ? `https://www.youtube.com/channel/${YOUTUBE_CHANNEL_ID}/community`
+            : `https://www.youtube.com/watch?v=${vidId}`;
+      const thumb = (s?.thumbnails as any)?.high?.url ?? (s?.thumbnails as any)?.medium?.url ?? (s?.thumbnails as any)?.default?.url ?? null;
+
+      newItems.push({
+        type,
+        title: s?.title ?? "New Activity",
+        url,
+        thumb,
+        desc: s?.description ?? "",
+        author: s?.channelTitle ?? "YouTube",
+        published: publishedAt ? new Date(publishedAt).toUTCString() : "",
+        key,
+      });
     }
 
-    const items = data?.items ?? [];
-    const postedIds = loadYtPostedIds();
+    // Search (fallback for videos)
+    for (const it of searchItems) {
+      const s = it?.snippet;
+      const vidId = it?.id?.videoId;
+      const publishedAt = s?.publishedAt;
+      const key = `search:${vidId}:${publishedAt}`;
+      if (postedIds.includes(key)) continue;
+      if (newItems.some((x) => x.url.includes(vidId))) continue; // dedupe
 
-    // Track by "type:publishedAt" — unique per activity regardless of content type
-    const newItems = items.filter((it: any) => {
-      const type = it?.snippet?.type;
-      const publishedAt = it?.snippet?.publishedAt;
-      const key = `${type}:${publishedAt}`;
-      return key && !postedIds.includes(key);
-    });
+      newItems.push({
+        type: "upload",
+        title: s?.title ?? "New Video",
+        url: `https://www.youtube.com/watch?v=${vidId}`,
+        thumb: (s?.thumbnails as any)?.high?.url ?? (s?.thumbnails as any)?.medium?.url ?? (s?.thumbnails as any)?.default?.url ?? null,
+        desc: s?.description ?? "",
+        author: s?.channelTitle ?? "YouTube",
+        published: publishedAt ? new Date(publishedAt).toUTCString() : "",
+        key,
+      });
+    }
+
+    // RSS (fallback for videos)
+    for (const vidId of rssIds) {
+      const key = `rss:${vidId}`;
+      if (postedIds.includes(key)) continue;
+      if (newItems.some((x) => x.url.includes(vidId))) continue; // dedupe
+
+      newItems.push({
+        type: "upload",
+        title: `New Video`,
+        url: `https://www.youtube.com/watch?v=${vidId}`,
+        thumb: null,
+        desc: "",
+        author: "YouTube",
+        published: "",
+        key,
+      });
+    }
+
+    // Community posts (scraper)
+    for (const post of communityPosts) {
+      const key = `post:${post.id}`;
+      if (postedIds.includes(key)) continue;
+      if (newItems.some((x) => x.url.includes(post.id))) continue;
+
+      newItems.push({
+        type: "post",
+        title: post.text || "Community Post",
+        url: post.url,
+        thumb: post.thumb,
+        desc: post.text,
+        author: "YouTube",
+        published: "",
+        key,
+      });
+    }
 
     if (newItems.length === 0) {
-      console.log("[YT] No new activities.");
+      console.log("[YT] No new activities across all sources.");
       return;
     }
 
@@ -927,70 +1082,23 @@ async function pollYouTubeUploads() {
       return;
     }
 
-    for (const it of newItems.reverse()) {
-      const s = it?.snippet;
-      const cd = it?.contentDetails;
-      const type = s?.type;
-      const publishedAt = s?.publishedAt;
-      const key = `${type}:${publishedAt}`;
-
-      const title = s?.title ?? "New Activity";
-      const description = s?.description ?? "";
-      let thumbnailUrl = (s?.thumbnails as any)?.high?.url ?? (s?.thumbnails as any)?.medium?.url ?? (s?.thumbnails as any)?.default?.url ?? null;
-      const channelTitle = s?.channelTitle ?? "YouTube";
-      const published = publishedAt ? new Date(publishedAt).toUTCString() : "";
-
-      let url: string;
-      let typeLabel: string;
-      let emoji: string;
-
-      if (type === "upload") {
-        const vidId = cd?.upload?.videoId;
-        url = `https://www.youtube.com/watch?v=${vidId}`;
-        typeLabel = "New Video";
-        emoji = "🎬";
-      } else if (type === "shortsUpload") {
-        const vidId = cd?.upload?.videoId;
-        url = `https://www.youtube.com/shorts/${vidId}`;
-        typeLabel = "New Short";
-        emoji = "⚡";
-      } else if (type === "liveEvent") {
-        const vidId = cd?.liveEvent?.videoId ?? cd?.upload?.videoId;
-        url = `https://www.youtube.com/watch?v=${vidId}`;
-        typeLabel = "🔴 LIVE";
-        emoji = "🔴";
-      } else if (type === "post") {
-        // Community posts — navigate to community tab
-        url = `https://www.youtube.com/channel/${YOUTUBE_CHANNEL_ID}/community`;
-        typeLabel = "Community Post";
-        emoji = "💬";
-        // For community posts with images, contentDetails.post has images array
-        const postImages = cd?.post?.images;
-        if (postImages?.[0]?.url) {
-          thumbnailUrl = postImages[0].url;
-        }
-      } else {
-        url = `https://www.youtube.com/channel/${YOUTUBE_CHANNEL_ID}`;
-        typeLabel = "New Activity";
-        emoji = "📢";
-      }
+    for (const item of newItems) {
+      const typeLabel = item.type === "upload" ? "New Video" : item.type === "shortsUpload" ? "New Short" : item.type === "liveEvent" ? "🔴 LIVE" : item.type === "post" ? "Community Post" : "New Activity";
+      const emoji = item.type === "upload" ? "🎬" : item.type === "shortsUpload" ? "⚡" : item.type === "liveEvent" ? "🔴" : item.type === "post" ? "💬" : "📢";
 
       const embed = new EmbedBuilder()
         .setColor(0xff0000)
-        .setTitle(`${emoji} ${typeLabel}: ${title}`)
-        .setURL(url)
-        .setDescription(
-          description
-            ? description.replace(/\s+/g, " ").trim().slice(0, 400)
-            : ""
-        )
-        .setFooter({ text: `${channelTitle} — ${published}` })
+        .setTitle(`${emoji} ${typeLabel}: ${item.title}`)
+        .setURL(item.url)
+        .setFooter({ text: `${item.author} — ${item.published}` })
         .setTimestamp();
-      if (thumbnailUrl) embed.setImage(thumbnailUrl);
+      const cleanDesc = item.desc?.replace(/\s+/g, " ").trim().slice(0, 400);
+      if (cleanDesc) embed.setDescription(cleanDesc);
+      if (item.thumb) embed.setImage(item.thumb);
 
       await dest.send({ content: `<@&${YT_NOTIFIER_ROLE_ID}>`, embeds: [embed] });
-      postedIds.push(key);
-      console.log(`[YT] Broadcasted: ${typeLabel} — ${title}`);
+      postedIds.push(item.key);
+      console.log(`[YT] Broadcasted: ${typeLabel} — ${item.title}`);
     }
 
     saveYtPostedIds(postedIds);
