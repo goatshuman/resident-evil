@@ -470,6 +470,52 @@ function detectRoomTier(members: Collection<string, GuildMember>): "high" | "mid
   return "none";
 }
 
+// Lock all regular channels for the Survivor role by editing category-level
+// permission overwrites (cascades to all children — far fewer API calls than
+// touching every individual channel or every member's roles).
+async function lockChannelsForBossFight(guild: Guild, bossChannelId: string): Promise<void> {
+  const targets = guild.channels.cache.filter((ch) => {
+    if (ch.id === HONEYPOT_CHANNEL_ID) return false;
+    if (ch.id === bossChannelId) return false;
+    if (ch.id === BOSS_CATEGORY_ID || ch.parentId === BOSS_CATEGORY_ID) return false;
+    if (ch.id === QUARANTINE_CATEGORY_ID || ch.parentId === QUARANTINE_CATEGORY_ID) return false;
+    // Edit categories (overwrites cascade) + standalone text channels outside any category
+    return ch.type === ChannelType.GuildCategory ||
+           (ch.type === ChannelType.GuildText && !ch.parentId);
+  });
+  await Promise.all(
+    targets.map((ch) =>
+      (ch as TextChannel).permissionOverwrites.edit(
+        SURVIVOR_ROLE_ID,
+        { ViewChannel: false, SendMessages: false },
+        { reason: "Boss fight started: lock channels for Survivor role" }
+      ).catch((err) => console.error(`[Boss] Lock failed on "${ch.name}":`, err))
+    )
+  );
+  console.log(`[Boss] Locked ${targets.size} target(s) via channel overwrites.`);
+}
+
+// Remove the Survivor role deny so regular channels are accessible again.
+async function unlockChannelsAfterBossFight(guild: Guild, bossChannelId: string): Promise<void> {
+  const targets = guild.channels.cache.filter((ch) => {
+    if (ch.id === HONEYPOT_CHANNEL_ID) return false;
+    if (ch.id === bossChannelId) return false;
+    if (ch.id === BOSS_CATEGORY_ID || ch.parentId === BOSS_CATEGORY_ID) return false;
+    if (ch.id === QUARANTINE_CATEGORY_ID || ch.parentId === QUARANTINE_CATEGORY_ID) return false;
+    return ch.type === ChannelType.GuildCategory ||
+           (ch.type === ChannelType.GuildText && !ch.parentId);
+  });
+  await Promise.all(
+    targets.map((ch) =>
+      (ch as TextChannel).permissionOverwrites.delete(
+        SURVIVOR_ROLE_ID,
+        "Boss fight ended: restore Survivor channel access"
+      ).catch((err) => console.error(`[Boss] Unlock failed on "${ch.name}":`, err))
+    )
+  );
+  console.log(`[Boss] Unlocked ${targets.size} target(s); channel access restored.`);
+}
+
 async function spawnBoss(guild: Guild) {
   if (activeBoss && !activeBoss.ended) {
     console.log("[Boss] Boss already active, ignoring spawn.");
@@ -501,9 +547,9 @@ async function spawnBoss(guild: Guild) {
       permissionOverwrites: [
         // Lock out everyone by default
         { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-        // Only Boss Fight role holders can see and chat in the arena
+        // Survivor role holders can see and chat in the arena (no role swap needed)
         {
-          id: BOSS_FIGHT_ROLE_ID,
+          id: SURVIVOR_ROLE_ID,
           allow: [
             PermissionFlagsBits.ViewChannel,
             PermissionFlagsBits.SendMessages,
@@ -529,28 +575,9 @@ async function spawnBoss(guild: Guild) {
     timer: null,
   };
 
-  // Assign Boss Fight Role to ALL non-bot, non-Dead members and strip Survivor role for the fight.
-  // Uses Promise.all for parallel execution — sequential awaits can exceed Discord's rate-limit
-  // window or the boss timer itself when there are many members.
-  try {
-    const freshMembers = await guild.members.fetch();
-    const eligible = Array.from(freshMembers.values()).filter(
-      (m) => !m.user.bot && !m.roles.cache.has(DEAD_ROLE_ID)
-    );
-    await Promise.all(
-      eligible.flatMap((member) => [
-        member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight started").catch((err) =>
-          console.error(`[Boss] Remove Survivor failed for ${member.user.tag}:`, err)
-        ),
-        member.roles.add(BOSS_FIGHT_ROLE_ID, "Boss fight initiated").catch((err) =>
-          console.error(`[Boss] Add BossFight failed for ${member.user.tag}:`, err)
-        ),
-      ])
-    );
-    console.log(`[Boss] Boss Fight Role assigned to ${eligible.length} member(s). Survivor role removed during fight.`);
-  } catch (err) {
-    console.error("[Boss] Failed to assign boss fight roles:", err);
-  }
+  // Lock regular channels for Survivor role via channel permission overwrites.
+  // No mass role swap needed — dramatically fewer API calls = no rate-limit risk.
+  await lockChannelsForBossFight(guild, bossChannel.id);
 
   const embed = buildBossEmbed(bossName, maxHp, maxHp);
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -598,21 +625,9 @@ async function bossVictory(guild: Guild) {
     console.log(`[Boss] Rewarded ${userId}: ${reward.toLocaleString()} Pesetas (best damage: ${bestDamage})`);
   }
 
-  // Strip Boss Fight Role and restore Survivor Role for all holders
-  try {
-    const members = await guild.members.fetch();
-    const fighters = Array.from(members.values()).filter((m) => m.roles.cache.has(BOSS_FIGHT_ROLE_ID));
-    await Promise.all(
-      fighters.flatMap((member) => [
-        member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: victory").catch((err) =>
-          console.error(`[Boss] Victory remove BossFight failed for ${member.user.tag}:`, err)
-        ),
-        member.roles.add(SURVIVOR_ROLE_ID, "Boss fight ended: victory — restored").catch((err) =>
-          console.error(`[Boss] Victory restore Survivor failed for ${member.user.tag}:`, err)
-        ),
-      ])
-    );
-  } catch (err) { console.error("[Boss] Victory role cleanup failed:", err); }
+  // Restore regular channel access for Survivor role and delete the arena.
+  // No role changes needed — Survivor roles were never removed during the fight.
+  await unlockChannelsAfterBossFight(guild, channelId);
 
   // Delete boss channel
   try {
@@ -629,40 +644,47 @@ async function bossDefeat(guild: Guild, _reason: "timeout" | "admin") {
   activeBoss.ended = true;
   if (activeBoss.timer) clearTimeout(activeBoss.timer);
 
-  const { bossName, channelId } = activeBoss;
+  const { bossName, channelId, participants } = activeBoss;
   activeBoss = null;
 
   const deadTimers = loadDeadRoleTimers();
 
-  // Strip Boss Fight Role + Survivor Role, assign Dead Role to all boss fight role holders
-  try {
-    const members = await guild.members.fetch();
-    const fighters = Array.from(members.entries()).filter(([, m]) => m.roles.cache.has(BOSS_FIGHT_ROLE_ID));
+  // Restore regular channels for everyone first (removes the Survivor deny overwrite).
+  await unlockChannelsAfterBossFight(guild, channelId);
 
-    // Record timers first (synchronous), then run all role changes in parallel
-    const now = Date.now();
-    for (const [memberId] of fighters) {
-      const existing = deadTimers.findIndex((t) => t.userId === memberId);
-      if (existing >= 0) deadTimers[existing].assignedAt = now;
-      else deadTimers.push({ userId: memberId, assignedAt: now });
-      scheduleDeadRoleRelease(guild, memberId, now);
+  // Quarantine ONLY the players who actually participated — no need to touch the
+  // entire server roster.  Non-participants just get their channels back above.
+  if (participants.size > 0) {
+    try {
+      const members = await guild.members.fetch();
+      const now = Date.now();
+
+      const participantMembers = Array.from(participants)
+        .map((id) => members.get(id))
+        .filter((m): m is GuildMember => !!m && !m.user.bot);
+
+      // Record quarantine timers synchronously, then fire role changes in parallel
+      for (const member of participantMembers) {
+        const existing = deadTimers.findIndex((t) => t.userId === member.id);
+        if (existing >= 0) deadTimers[existing].assignedAt = now;
+        else deadTimers.push({ userId: member.id, assignedAt: now });
+        scheduleDeadRoleRelease(guild, member.id, now);
+      }
+
+      await Promise.all(
+        participantMembers.flatMap((member) => [
+          member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight defeat").catch((err) =>
+            console.error(`[Boss] Defeat remove Survivor failed for ${member.user.tag}:`, err)
+          ),
+          member.roles.add(DEAD_ROLE_ID, "Boss fight defeat").catch((err) =>
+            console.error(`[Boss] Defeat add Dead failed for ${member.user.tag}:`, err)
+          ),
+        ])
+      );
+      console.log(`[Boss] Quarantined ${participantMembers.length} participant(s).`);
+    } catch (err) {
+      console.error("[Boss] Failed to quarantine participants:", err);
     }
-
-    await Promise.all(
-      fighters.flatMap(([, member]) => [
-        member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: defeat").catch((err) =>
-          console.error(`[Boss] Defeat remove BossFight failed for ${member.user.tag}:`, err)
-        ),
-        member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight defeat").catch((err) =>
-          console.error(`[Boss] Defeat remove Survivor failed for ${member.user.tag}:`, err)
-        ),
-        member.roles.add(DEAD_ROLE_ID, "Boss fight defeat").catch((err) =>
-          console.error(`[Boss] Defeat add Dead failed for ${member.user.tag}:`, err)
-        ),
-      ])
-    );
-  } catch (err) {
-    console.error("[Boss] Failed to assign dead roles:", err);
   }
 
   saveDeadRoleTimers(deadTimers);
