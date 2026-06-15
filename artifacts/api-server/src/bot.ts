@@ -128,6 +128,11 @@ const NEWS_PING_ROLE_ID = "1516019185434493018";
 const YT_NOTIFIER_CHANNEL_ID = "1516019891923062964";
 const YT_NOTIFIER_ROLE_ID    = "1516019514934956112";
 
+// Media mirror: messages with attachments or URLs posted here are forwarded to YT_NOTIFIER_CHANNEL_ID
+const UPLOAD_SOURCE_CHANNEL_ID = ""; // ← fill in your source channel ID
+
+const RAW_URL_RE = /https?:\/\/[^\s<>"]+/g;
+
 // ── News feeds ───────────────────────────────────────────────────────────────
 const NEWS_FEEDS = [
   // Google News dynamic search — always fresh, largest pool
@@ -2045,6 +2050,54 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 // ============================================================
 client.on("messageCreate", async (message: Message) => {
   if (message.author.bot) return;
+
+  // ── Media mirror ─────────────────────────────────────────────────────────────
+  // Forward uploads/links from the source channel to the YT notifier channel as
+  // embeds.  Does NOT return — prefix commands still execute after this block
+  // (equivalent to discord.py's `await bot.process_commands(message)` at the end).
+  if (UPLOAD_SOURCE_CHANNEL_ID && message.channelId === UPLOAD_SOURCE_CHANNEL_ID) {
+    const destId = YT_NOTIFIER_CHANNEL_ID;
+    const dest = (message.guild?.channels.cache.get(destId)
+      ?? await client.channels.fetch(destId).catch(() => null)) as TextChannel | null;
+
+    if (dest) {
+      if (message.attachments.size > 0) {
+        // One embed per attachment so each gets its own thumbnail / image preview
+        for (const att of message.attachments.values()) {
+          const isImage = /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(att.name ?? "");
+          const embed = new EmbedBuilder()
+            .setColor(0xff0000)
+            .setTitle("📎 New Upload")
+            .setDescription(
+              `[${att.name ?? "file"}](${att.url})`
+              + (message.content ? `\n\n${message.content}` : "")
+            )
+            .setFooter({ text: `Uploaded by ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
+            .setTimestamp();
+          if (isImage) embed.setImage(att.url);
+          else embed.setThumbnail(att.url);
+          await dest.send({ embeds: [embed] }).catch((err) =>
+            console.error("[Mirror] Attachment send failed:", err)
+          );
+        }
+      } else {
+        // No attachment — look for raw URLs in message text
+        const urls = message.content.match(RAW_URL_RE);
+        if (urls?.length) {
+          const embed = new EmbedBuilder()
+            .setColor(0xff0000)
+            .setTitle("🔗 New Link")
+            .setDescription(message.content)
+            .setFooter({ text: `Shared by ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
+            .setTimestamp();
+          await dest.send({ embeds: [embed] }).catch((err) =>
+            console.error("[Mirror] URL send failed:", err)
+          );
+        }
+      }
+    }
+    // ↓ intentionally falls through so prefix commands still work
+  }
 
   // YouTube notifier — ping subscribers whenever anyone posts in the YT channel
   if (message.channelId === YT_NOTIFIER_CHANNEL_ID) {
