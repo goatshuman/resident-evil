@@ -2467,6 +2467,18 @@ client.on("messageCreate", async (message: Message) => {
       console.log(`[News] Posted-URL history cleared by ${message.author.tag}`);
       return;
     }
+    if (message.content === "!ytcheck") {
+      await message.delete().catch(() => {});
+      console.log(`[YT] Manual poll triggered by ${message.author.tag}`);
+      await pollYouTubeUploads();
+      return;
+    }
+    if (message.content === "!ytclear") {
+      await message.delete().catch(() => {});
+      saveYtPostedIds([]);
+      console.log(`[YT] Posted-IDs history cleared by ${message.author.tag}`);
+      return;
+    }
   }
 
   // Boss commands — only allowed for the two owner IDs
