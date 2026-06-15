@@ -129,7 +129,7 @@ const YT_NOTIFIER_CHANNEL_ID = "1516019891923062964";
 const YT_NOTIFIER_ROLE_ID    = "1516019514934956112";
 
 // Media mirror: messages with attachments or URLs posted here are forwarded to YT_NOTIFIER_CHANNEL_ID
-const UPLOAD_SOURCE_CHANNEL_ID = ""; // ← fill in your source channel ID
+const UPLOAD_SOURCE_CHANNEL_ID = "1516019891923062964"; // posts here are mirrored to YT_NOTIFIER_CHANNEL_ID
 
 const RAW_URL_RE = /https?:\/\/[^\s<>"]+/g;
 
