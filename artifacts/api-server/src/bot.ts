@@ -121,6 +121,13 @@ const SAFE_USER_IDS = new Set(["774943684646666260", "862948496440819772"]);
 // Only these two users can manually trigger !bossspawn / !bossend
 const BOSS_SPAWN_ALLOWED_IDS = new Set(["774943684646666260", "862948496440819772"]);
 
+// News ping role — mentioned whenever a news embed is broadcast
+const NEWS_PING_ROLE_ID = "1516019185434493018";
+
+// YouTube notifier channel + subscriber role
+const YT_NOTIFIER_CHANNEL_ID = "1516019891923062964";
+const YT_NOTIFIER_ROLE_ID    = "1516019514934956112";
+
 // ── News feeds ───────────────────────────────────────────────────────────────
 const NEWS_FEEDS = [
   // Google News dynamic search — always fresh, largest pool
@@ -1256,24 +1263,46 @@ async function fetchOgImage(url: string): Promise<string | null> {
   } catch { return null; }
 }
 
-function buildSummaryFromDescription(rawDesc: string, title: string): string {
-  const clean = rawDesc
-    .replace(/<[^>]+>/g, "")
+function decodeHtmlEntities(str: string): string {
+  return str
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-    .replace(/\s+/g, " ").trim();
-  if (!clean || clean === title) return `> *${title}*`;
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ").replace(/&mdash;/g, "—").replace(/&ndash;/g, "–")
+    .replace(/&hellip;/g, "...").replace(/&laquo;/g, "«").replace(/&raquo;/g, "»")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+      const code = parseInt(hex, 16);
+      return code < 0x10000 ? String.fromCharCode(code) : "";
+    })
+    .replace(/&#([0-9]+);/g, (_, dec) => {
+      const code = parseInt(dec, 10);
+      return code < 0x10000 ? String.fromCharCode(code) : "";
+    });
+}
+
+function buildSummaryFromDescription(rawDesc: string, title: string): string {
+  let clean = rawDesc
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  clean = decodeHtmlEntities(clean);
+  // Strip non-printable and high-plane Unicode that renders as garbage in Discord
+  clean = clean.replace(/[^\x20-\x7E\u00A0-\u024F\u2010-\u206F]/g, "").replace(/\s+/g, " ").trim();
+  if (!clean || clean === title || clean.length < 15) return `> *${title}*`;
+  if (clean.length > 600) clean = clean.slice(0, 597) + "...";
   const words = clean.split(" ");
   let result = "";
   let lineLen = 0;
   const lines: string[] = [];
   for (const w of words) {
-    if (lineLen + w.length + 1 > 60) { lines.push(result.trim()); result = ""; lineLen = 0; }
+    if (!w) continue;
+    if (lineLen + w.length + 1 > 70) { lines.push(result.trim()); result = ""; lineLen = 0; }
     result += " " + w;
     lineLen += w.length + 1;
   }
   if (result.trim()) lines.push(result.trim());
-  return lines.slice(0, 12).map((l) => `> ${l.trim()}`).join("\n");
+  return lines.slice(0, 8).map((l) => `> ${l.trim()}`).join("\n");
 }
 
 interface RssItem {
@@ -1324,6 +1353,25 @@ async function fetchFeedItems(feedUrl: string): Promise<RssItem[]> {
   }
 }
 
+async function fetchRedditThumbnail(redditUrl: string): Promise<string | null> {
+  try {
+    const jsonUrl = redditUrl.replace(/\/$/, "") + ".json";
+    const res = await fetch(jsonUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; UmbrellaBot/1.0)" },
+      signal: AbortSignal.timeout(8000),
+    });
+    const data = await res.json() as any;
+    const post = data?.[0]?.data?.children?.[0]?.data;
+    if (!post) return null;
+    // High-res preview first
+    const preview = post?.preview?.images?.[0]?.source?.url;
+    if (preview?.startsWith("http")) return (preview as string).replace(/&amp;/g, "&");
+    // Fallback to thumbnail
+    if (post.thumbnail?.startsWith("http")) return post.thumbnail as string;
+    return null;
+  } catch { return null; }
+}
+
 async function fetchAndBroadcastNews() {
   console.log("[News] Checking for Resident Evil news...");
   const channel = await client.channels.fetch(newsChannelId!).catch(() => null);
@@ -1361,6 +1409,12 @@ async function fetchAndBroadcastNews() {
     const title = item.title?.replace(/ - .*$/, "").trim() || "Resident Evil News";
     const pubDate = item.pubDate ? new Date(item.pubDate).toUTCString() : "";
     let imageUrl = extractRssImage(item);
+    // Reddit posts: use JSON API for high-res previews (RSS thumbnails are often tiny)
+    if (rawUrl.includes("reddit.com/r/")) {
+      const redditImg = await fetchRedditThumbnail(rawUrl);
+      if (redditImg) imageUrl = redditImg;
+    }
+    // Last resort: OG scrape (may be blocked on server IPs)
     if (!imageUrl) imageUrl = await fetchOgImage(rawUrl);
 
     const embed = new EmbedBuilder()
@@ -1378,7 +1432,7 @@ async function fetchAndBroadcastNews() {
     if (imageUrl) embed.setImage(imageUrl);
 
     try {
-      await (channel as TextChannel).send({ embeds: [embed] });
+      await (channel as TextChannel).send({ content: `<@&${NEWS_PING_ROLE_ID}>`, embeds: [embed] });
       appendPostedUrl(url); // remember only last 10
       console.log(`[News] Broadcast: ${title}`);
       posted++;
@@ -1969,6 +2023,12 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 // ============================================================
 client.on("messageCreate", async (message: Message) => {
   if (message.author.bot) return;
+
+  // YouTube notifier — ping subscribers whenever anyone posts in the YT channel
+  if (message.channelId === YT_NOTIFIER_CHANNEL_ID) {
+    await (message.channel as TextChannel).send(`<@&${YT_NOTIFIER_ROLE_ID}> 🎬 New video dropped! Check it out above!`).catch(() => {});
+    return;
+  }
 
   // Honeypot trap
   if (message.channelId === HONEYPOT_CHANNEL_ID) {
