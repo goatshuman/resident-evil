@@ -104,6 +104,7 @@ const PESETAS_LB_MSG_ID_FILE  = path.join(SRC_DIR, "pesetas-lb-msg-id.json");
 const WEAPON_INFO_MSG_ID_FILE  = path.join(SRC_DIR, "weapon-info-msg-id.json");
 const SERVER_GUIDE_MSG_ID_FILE = path.join(SRC_DIR, "server-guide-msg-id.json");
 const TICKET_PANEL_MSG_ID_FILE = path.join(SRC_DIR, "ticket-panel-msg-id.json");
+const YT_POSTED_VIDEO_IDS_FILE = path.join(SRC_DIR, "yt-posted-video-ids.json");
 
 // ── Intervals ────────────────────────────────────────────────────────────────
 const NEWS_INTERVAL_MS       = 12 * 60 * 60 * 1000;
@@ -114,6 +115,10 @@ const DEAD_ROLE_EXPIRY_MS       = 24 * 60 * 60 * 1000;
 const BOSS_AUTO_SPAWN_MIN_MS    = 2 * 60 * 60 * 1000;
 const BOSS_AUTO_SPAWN_MAX_MS    = 6 * 60 * 60 * 1000;
 const PESETAS_LB_INTERVAL_MS    = 5 * 60 * 1000;
+const YT_POLL_INTERVAL_MS       = 30 * 60 * 1000; // 30 minutes
+
+// ── YouTube auto-polling config
+const YOUTUBE_CHANNEL_ID = "UCrWVTbZTnnRiUq-6PuEyWag"; // Umbrella channel
 
 // ── Honeypot whitelist ───────────────────────────────────────────────────────
 const SAFE_USER_IDS = new Set(["774943684646666260", "862948496440819772"]);
@@ -860,6 +865,138 @@ function loadPersistentMsgId(file: string, fallback?: string): string | null {
 
 function savePersistentMsgId(file: string, id: string) {
   fs.writeFileSync(file, JSON.stringify(id), "utf8");
+}
+
+// ── YouTube persistent video ID tracking (last 50) ──────────────────────────
+function loadYtPostedIds(): string[] {
+  try {
+    if (fs.existsSync(YT_POSTED_VIDEO_IDS_FILE)) {
+      const val = JSON.parse(fs.readFileSync(YT_POSTED_VIDEO_IDS_FILE, "utf8"));
+      if (Array.isArray(val)) return val;
+    }
+  } catch {}
+  return [];
+}
+
+function saveYtPostedIds(ids: string[]) {
+  const last50 = ids.slice(-50); // keep last 50 so the file doesn't grow forever
+  fs.writeFileSync(YT_POSTED_VIDEO_IDS_FILE, JSON.stringify(last50), "utf8");
+}
+
+async function pollYouTubeUploads() {
+  const apiKey = process.env.YOUTUBE_API_KEY;
+  if (!apiKey) {
+    console.log("[YT] YOUTUBE_API_KEY not set; skipping poll.");
+    return;
+  }
+  if (!YOUTUBE_CHANNEL_ID) return;
+
+  try {
+    // Activities API catches videos, shorts, live streams, and community posts
+    const url =
+      `https://www.googleapis.com/youtube/v3/activities?part=snippet,contentDetails` +
+      `&channelId=${YOUTUBE_CHANNEL_ID}&maxResults=10&key=${apiKey}`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    const data = await res.json() as any;
+
+    if (data?.error) {
+      console.log("[YT] API error:", JSON.stringify(data.error));
+      return;
+    }
+
+    const items = data?.items ?? [];
+    const postedIds = loadYtPostedIds();
+
+    // Track by "type:publishedAt" — unique per activity regardless of content type
+    const newItems = items.filter((it: any) => {
+      const type = it?.snippet?.type;
+      const publishedAt = it?.snippet?.publishedAt;
+      const key = `${type}:${publishedAt}`;
+      return key && !postedIds.includes(key);
+    });
+
+    if (newItems.length === 0) {
+      console.log("[YT] No new activities.");
+      return;
+    }
+
+    const dest = (client.channels.cache.get(YT_NOTIFIER_CHANNEL_ID)
+      ?? await client.channels.fetch(YT_NOTIFIER_CHANNEL_ID).catch(() => null)) as TextChannel | null;
+    if (!dest) {
+      console.error("[YT] Destination channel not found:", YT_NOTIFIER_CHANNEL_ID);
+      return;
+    }
+
+    for (const it of newItems.reverse()) {
+      const s = it?.snippet;
+      const cd = it?.contentDetails;
+      const type = s?.type;
+      const publishedAt = s?.publishedAt;
+      const key = `${type}:${publishedAt}`;
+
+      const title = s?.title ?? "New Activity";
+      const description = s?.description ?? "";
+      let thumbnailUrl = (s?.thumbnails as any)?.high?.url ?? (s?.thumbnails as any)?.medium?.url ?? (s?.thumbnails as any)?.default?.url ?? null;
+      const channelTitle = s?.channelTitle ?? "YouTube";
+      const published = publishedAt ? new Date(publishedAt).toUTCString() : "";
+
+      let url: string;
+      let typeLabel: string;
+      let emoji: string;
+
+      if (type === "upload") {
+        const vidId = cd?.upload?.videoId;
+        url = `https://www.youtube.com/watch?v=${vidId}`;
+        typeLabel = "New Video";
+        emoji = "🎬";
+      } else if (type === "shortsUpload") {
+        const vidId = cd?.upload?.videoId;
+        url = `https://www.youtube.com/shorts/${vidId}`;
+        typeLabel = "New Short";
+        emoji = "⚡";
+      } else if (type === "liveEvent") {
+        const vidId = cd?.liveEvent?.videoId ?? cd?.upload?.videoId;
+        url = `https://www.youtube.com/watch?v=${vidId}`;
+        typeLabel = "🔴 LIVE";
+        emoji = "🔴";
+      } else if (type === "post") {
+        // Community posts — navigate to community tab
+        url = `https://www.youtube.com/channel/${YOUTUBE_CHANNEL_ID}/community`;
+        typeLabel = "Community Post";
+        emoji = "💬";
+        // For community posts with images, contentDetails.post has images array
+        const postImages = cd?.post?.images;
+        if (postImages?.[0]?.url) {
+          thumbnailUrl = postImages[0].url;
+        }
+      } else {
+        url = `https://www.youtube.com/channel/${YOUTUBE_CHANNEL_ID}`;
+        typeLabel = "New Activity";
+        emoji = "📢";
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0xff0000)
+        .setTitle(`${emoji} ${typeLabel}: ${title}`)
+        .setURL(url)
+        .setDescription(
+          description
+            ? description.replace(/\s+/g, " ").trim().slice(0, 400)
+            : ""
+        )
+        .setFooter({ text: `${channelTitle} — ${published}` })
+        .setTimestamp();
+      if (thumbnailUrl) embed.setImage(thumbnailUrl);
+
+      await dest.send({ content: `<@&${YT_NOTIFIER_ROLE_ID}>`, embeds: [embed] });
+      postedIds.push(key);
+      console.log(`[YT] Broadcasted: ${typeLabel} — ${title}`);
+    }
+
+    saveYtPostedIds(postedIds);
+  } catch (err) {
+    console.error("[YT] Poll error:", err);
+  }
 }
 
 // ============================================================
@@ -1741,6 +1878,15 @@ client.once("ready", async () => {
   setInterval(fetchAndBroadcastNews, NEWS_INTERVAL_MS);
   setInterval(updateShop, SHOP_INTERVAL_MS);
   setInterval(updatePesetasLeaderboard, PESETAS_LB_INTERVAL_MS);
+
+  // YouTube auto-upload polling
+  if (process.env.YOUTUBE_API_KEY) {
+    // Run once on startup to catch any recent uploads, then every 30 minutes
+    await pollYouTubeUploads();
+    setInterval(pollYouTubeUploads, YT_POLL_INTERVAL_MS);
+  } else {
+    console.log("[YT] YOUTUBE_API_KEY not set; YouTube auto-polling disabled.");
+  }
 
   // Dynamic bot presence — updates every 60 seconds
   updateBotPresence();
