@@ -497,14 +497,15 @@ function detectRoomTier(members: Collection<string, GuildMember>): "high" | "mid
 // permission overwrites (cascades to all children — far fewer API calls than
 // touching every individual channel or every member's roles).
 async function lockChannelsForBossFight(guild: Guild, bossChannelId: string): Promise<void> {
+  // Lock ALL text channels (not just categories) — individual channel overwrites
+  // override category-level ones, so we must set deny on every channel the Survivor
+  // role has access to.
   const targets = guild.channels.cache.filter((ch) => {
     if (ch.id === HONEYPOT_CHANNEL_ID) return false;
     if (ch.id === bossChannelId) return false;
     if (ch.id === BOSS_CATEGORY_ID || ch.parentId === BOSS_CATEGORY_ID) return false;
     if (ch.id === QUARANTINE_CATEGORY_ID || ch.parentId === QUARANTINE_CATEGORY_ID) return false;
-    // Edit categories (overwrites cascade) + standalone text channels outside any category
-    return ch.type === ChannelType.GuildCategory ||
-           (ch.type === ChannelType.GuildText && !ch.parentId);
+    return ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildVoice;
   });
   await Promise.all(
     targets.map((ch) =>
@@ -525,8 +526,7 @@ async function unlockChannelsAfterBossFight(guild: Guild, bossChannelId: string)
     if (ch.id === bossChannelId) return false;
     if (ch.id === BOSS_CATEGORY_ID || ch.parentId === BOSS_CATEGORY_ID) return false;
     if (ch.id === QUARANTINE_CATEGORY_ID || ch.parentId === QUARANTINE_CATEGORY_ID) return false;
-    return ch.type === ChannelType.GuildCategory ||
-           (ch.type === ChannelType.GuildText && !ch.parentId);
+    return ch.type === ChannelType.GuildText || ch.type === ChannelType.GuildVoice;
   });
   await Promise.all(
     targets.map((ch) =>
@@ -598,8 +598,18 @@ async function spawnBoss(guild: Guild) {
     timer: null,
   };
 
+  // Assign Boss Fight role to Survivor members so they get the arena-only view.
+  // (Only Survivor members who actually have the role; this is fast since the list is already fetched.)
+  await Promise.all(
+    survivorMembers.map((m) =>
+      m.roles.add(BOSS_FIGHT_ROLE_ID, "Boss fight started").catch((err) =>
+        console.error(`[Boss] Role grant failed for ${m.user.tag}:`, err)
+      )
+    )
+  );
+  console.log(`[Boss] Granted Boss Fight role to ${survivorMembers.size} survivor(s).`);
+
   // Lock regular channels for Survivor role via channel permission overwrites.
-  // No mass role swap needed — dramatically fewer API calls = no rate-limit risk.
   await lockChannelsForBossFight(guild, bossChannel.id);
 
   const embed = buildBossEmbed(bossName, maxHp, maxHp);
@@ -649,8 +659,22 @@ async function bossVictory(guild: Guild) {
   }
 
   // Restore regular channel access for Survivor role and delete the arena.
-  // No role changes needed — Survivor roles were never removed during the fight.
   await unlockChannelsAfterBossFight(guild, channelId);
+
+  // Remove Boss Fight role from all participants
+  try {
+    const members = await guild.members.fetch();
+    await Promise.all(
+      Array.from(participants).map((id) => {
+        const m = members.get(id);
+        if (m && m.roles.cache.has(BOSS_FIGHT_ROLE_ID)) {
+          return m.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: victory").catch(() => {});
+        }
+        return Promise.resolve();
+      })
+    );
+    console.log(`[Boss] Removed Boss Fight role from ${participants.size} participant(s).`);
+  } catch { }
 
   // Delete boss channel
   try {
@@ -702,6 +726,7 @@ async function bossDefeat(guild: Guild, _reason: "timeout" | "admin") {
           member.roles.add(DEAD_ROLE_ID, "Boss fight defeat").catch((err) =>
             console.error(`[Boss] Defeat add Dead failed for ${member.user.tag}:`, err)
           ),
+          member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight defeat").catch(() => {}),
         ])
       );
       console.log(`[Boss] Quarantined ${participantMembers.length} participant(s).`);
@@ -1550,18 +1575,12 @@ async function updatePesetasLeaderboard() {
       console.log(`[Leaderboard] Updated Pesetas leaderboard. ID: ${existingId}`);
       return;
     } catch (err: any) {
-      if (err?.code !== 10008) { console.error("[Leaderboard] Failed to edit:", err); return; }
-      console.log("[Leaderboard] Message gone. Posting new one...");
+      if (err?.code !== 10008) console.error("[Leaderboard] Failed to edit:", err);
+      else console.log("[Leaderboard] Message deleted; nothing to edit.");
+      return;
     }
   }
-
-  try {
-    const channel = await client.channels.fetch(PESETAS_LB_CHANNEL_ID);
-    if (!channel || typeof (channel as any).send !== "function") return;
-    const msg = await (channel as TextChannel).send({ embeds: [embed] });
-    savePersistentMsgId(PESETAS_LB_MSG_ID_FILE, msg.id);
-    console.log(`[Leaderboard] Pesetas leaderboard posted. ID: ${msg.id}`);
-  } catch (err) { console.error("[Leaderboard] Failed to post:", err); }
+  console.log("[Leaderboard] No existing message ID found; skipping update.");
 }
 
 function buildWelcomeEmbed(member: GuildMember): EmbedBuilder {
@@ -1775,12 +1794,18 @@ async function fetchAndBroadcastNews() {
     const title = item.title?.replace(/ - .*$/, "").trim() || "Resident Evil News";
     const pubDate = item.pubDate ? new Date(item.pubDate).toUTCString() : "";
     let imageUrl = extractRssImage(item);
-    // Reddit posts: use JSON API for high-res previews (RSS thumbnails are often tiny)
+    // Reddit posts: use JSON API for high-res previews
     if (rawUrl.includes("reddit.com/r/")) {
       const redditImg = await fetchRedditThumbnail(rawUrl);
       if (redditImg) imageUrl = redditImg;
     }
-    // Last resort: OG scrape (may be blocked on server IPs)
+    // Description may contain an image URL
+    if (!imageUrl) {
+      const desc = String(item.description ?? "");
+      const urlMatch = desc.match(/https?:\/\/[^\s\"]+\.(?:png|jpg|jpeg|gif|webp)/i);
+      if (urlMatch) imageUrl = urlMatch[0];
+    }
+    // Last resort: OG scrape
     if (!imageUrl) imageUrl = await fetchOgImage(rawUrl);
 
     const embed = new EmbedBuilder()
@@ -2232,7 +2257,6 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
     saveVotes(HERO_VOTES_FILE, votes);
     await message.edit({ embeds: [buildHeroEmbed(votes)], components: message.components });
-    await interaction.deferUpdate();
     return;
   }
 
@@ -2257,7 +2281,6 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 
     saveVotes(VILLAIN_VOTES_FILE, votes);
     await message.edit({ embeds: [buildVillainEmbed(votes)], components: message.components });
-    await interaction.deferUpdate();
     return;
   }
 
@@ -2412,7 +2435,7 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 client.on("messageCreate", async (message: Message) => {
   if (message.author.bot) return;
 
-  // ── AI Terminal ─────────────────────────────────────────────────────────────
+  // ── AI Terminal (dedicated channel only) ───────────────────────────────
   if (message.channelId === AI_TERMINAL_CHANNEL_ID) {
     // Schedule auto-delete for every non-sticky message
     await scheduleDelete(message);
@@ -2428,13 +2451,13 @@ client.on("messageCreate", async (message: Message) => {
       console.log(`[AI] ${message.author.tag}: ${question.slice(0, 80)}...`);
 
       const aiReply = await callGemini(question);
-      const replyMsg = await (message.channel as TextChannel).send(aiReply);
+      const replyMsg = await message.reply(aiReply);
       await scheduleDelete(replyMsg);
       await postOrUpdateStickyEmbed(message.channel as TextChannel);
       return; // don't process as a command
     }
 
-    // After any user message, repost the sticky embed at the bottom
+    // After any user message in the terminal, repost the sticky embed at the bottom
     await postOrUpdateStickyEmbed(message.channel as TextChannel);
     return; // stop here — commands don't work in the AI terminal
   }
