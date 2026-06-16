@@ -145,7 +145,13 @@ const AI_TERMINAL_STICKY_FILE = path.join(SRC_DIR, "ai-terminal-sticky-msg-id.js
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_SYSTEM_PROMPT =
-  "You are the Umbrella Corporation mainframe terminal. You have flawless, complete knowledge of all Resident Evil lore, files, characters, and events. Do not sound like a generic, corporate AI assistant. Do not use robotic clichés, pre-written templates, or scripted answers. Talk naturally, directly, and realistically like an authentic operational database. Keep answers highly engaging and perfect for killing time.";
+  "You are the Umbrella Corporation mainframe terminal — a hardened operational database with no time for pleasantries. You have complete, flawless knowledge of all Resident Evil lore, characters, files, and events.\n\n" +
+  "RULES:\n" +
+  "1. SHORT & CONCISE: 2 to 4 sentences max. Never write walls of text. Break information down.\n" +
+  "2. HUMAN TONE: No AI clichés. Banned words: 'Greetings', 'How can I assist you today', 'As an AI', 'Delve', 'Testament', 'Fascinating', 'It is important to note', 'Furthermore', 'Moreover', 'I would like to', 'Please note'. Drop all corporate politeness. Speak raw, direct, and aggressively when needed.\n" +
+  "3. LORE AWARE: You know every Resident Evil detail cold — files, characters, weapons, locations, events, timelines. Deliver data sharply and accurately.\n" +
+  "4. SERVER AWARE: You know the server runs on Pesetas, boss fights, quarantine, and a 60-second message wipe. Reference these mechanics naturally when relevant.\n" +
+  "5. PERSONA: You are an overworked Umbrella terminal operator who has seen too much. Dry, blunt, occasionally dark. No enthusiasm. Just facts, fast.";
 
 // Active sticky message ID in the AI terminal — kept in memory + persisted
 let aiTerminalStickyId: string | null = null;
@@ -510,9 +516,9 @@ async function lockChannelsForBossFight(guild: Guild, bossChannelId: string): Pr
   await Promise.all(
     targets.map((ch) =>
       (ch as TextChannel).permissionOverwrites.edit(
-        SURVIVOR_ROLE_ID,
+        BOSS_FIGHT_ROLE_ID,
         { ViewChannel: false, SendMessages: false },
-        { reason: "Boss fight started: lock channels for Survivor role" }
+        { reason: "Boss fight started: lock channels for Boss Fight role" }
       ).catch((err) => console.error(`[Boss] Lock failed on "${ch.name}":`, err))
     )
   );
@@ -531,8 +537,8 @@ async function unlockChannelsAfterBossFight(guild: Guild, bossChannelId: string)
   await Promise.all(
     targets.map((ch) =>
       (ch as TextChannel).permissionOverwrites.delete(
-        SURVIVOR_ROLE_ID,
-        "Boss fight ended: restore Survivor channel access"
+        BOSS_FIGHT_ROLE_ID,
+        "Boss fight ended: restore Boss Fight channel access"
       ).catch((err) => console.error(`[Boss] Unlock failed on "${ch.name}":`, err))
     )
   );
@@ -570,14 +576,19 @@ async function spawnBoss(guild: Guild) {
       permissionOverwrites: [
         // Lock out everyone by default
         { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-        // Survivor role holders can see and chat in the arena (no role swap needed)
+        // Boss Fight role holders can see and chat in the arena
         {
-          id: SURVIVOR_ROLE_ID,
+          id: BOSS_FIGHT_ROLE_ID,
           allow: [
             PermissionFlagsBits.ViewChannel,
             PermissionFlagsBits.SendMessages,
             PermissionFlagsBits.ReadMessageHistory,
           ],
+        },
+        // Survivors without the Boss Fight role are locked out
+        {
+          id: SURVIVOR_ROLE_ID,
+          deny: [PermissionFlagsBits.ViewChannel],
         },
       ],
     }) as TextChannel;
