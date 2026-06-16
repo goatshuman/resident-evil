@@ -25,6 +25,7 @@ import { parse as parseHtml } from "node-html-parser";
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
+// Gemini AI uses direct REST API calls below (no library needed)
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -137,6 +138,18 @@ const YT_NOTIFIER_ROLE_ID    = "1516019514934956112";
 const UPLOAD_SOURCE_CHANNEL_ID = "1516019891923062964"; // posts here are mirrored to YT_NOTIFIER_CHANNEL_ID
 
 const RAW_URL_RE = /https?:\/\/[^\s<>"]+/g;
+
+// ── AI Terminal ─────────────────────────────────────────────────────────────
+const AI_TERMINAL_CHANNEL_ID = "1516043914870657146";
+const AI_TERMINAL_STICKY_FILE = path.join(SRC_DIR, "ai-terminal-sticky-msg-id.json");
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_SYSTEM_PROMPT =
+  "You are the Umbrella Corporation mainframe terminal. You have flawless, complete knowledge of all Resident Evil lore, files, characters, and events. Do not sound like a generic, corporate AI assistant. Do not use robotic clichés, pre-written templates, or scripted answers. Talk naturally, directly, and realistically like an authentic operational database. Keep answers highly engaging and perfect for killing time.";
+
+// Active sticky message ID in the AI terminal — kept in memory + persisted
+let aiTerminalStickyId: string | null = null;
+const aiTerminalDeleteTimers = new Map<string, NodeJS.Timeout>();
 
 // ── News feeds ───────────────────────────────────────────────────────────────
 const NEWS_FEEDS = [
@@ -867,7 +880,80 @@ function savePersistentMsgId(file: string, id: string) {
   fs.writeFileSync(file, JSON.stringify(id), "utf8");
 }
 
-// ── YouTube persistent video ID tracking (last 50) ──────────────────────────
+// === Gemini AI helper =========================================================
+async function callGemini(userText: string): Promise<string> {
+  if (!GEMINI_API_KEY) return "[SYSTEM] GEMINI_API_KEY not configured.";
+  try {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: GEMINI_SYSTEM_PROMPT }] },
+        contents: [{ role: "user", parts: [{ text: userText }] }],
+        generationConfig: { maxOutputTokens: 2048, temperature: 0.8 },
+      }),
+      signal: AbortSignal.timeout(25_000),
+    });
+    const data = await res.json() as any;
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (text) return text;
+    const err = data?.error?.message;
+    if (err) return `[SYSTEM] Gemini error: ${err}`;
+    return "[SYSTEM] No response from AI.";
+  } catch (err) {
+    return `[SYSTEM] Gemini call failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+// === AI Terminal sticky embed ================================================
+function loadAiTerminalStickyId(): string | null {
+  try { if (fs.existsSync(AI_TERMINAL_STICKY_FILE)) { const v = JSON.parse(fs.readFileSync(AI_TERMINAL_STICKY_FILE, "utf8")); if (v) return v; } } catch {}
+  return null;
+}
+function saveAiTerminalStickyId(id: string) {
+  fs.writeFileSync(AI_TERMINAL_STICKY_FILE, JSON.stringify(id), "utf8");
+}
+
+async function postOrUpdateStickyEmbed(channel: TextChannel) {
+  const embed = new EmbedBuilder()
+    .setColor(0xFF0000)
+    .setTitle("☣️ SYSTEM INTEGRATION")
+    .setDescription(
+      "@Umbrella Corporation AI Online. Ask questions by mentioning the bot. " +
+      "Others can talk to the AI by mentioning him. This terminal auto-wipes logs " +
+      "every 60 seconds for server security. Perfect for passing time."
+    )
+    .setFooter({ text: "UMBRELLA MAINFRAME — AI TERMINAL" })
+    .setTimestamp();
+
+  if (aiTerminalStickyId) {
+    try {
+      const old = await channel.messages.fetch(aiTerminalStickyId);
+      if (old) await old.delete();
+    } catch (err) {
+      // Already deleted or not found — silently continue
+    }
+  }
+  const msg = await channel.send({ embeds: [embed] });
+  aiTerminalStickyId = msg.id;
+  saveAiTerminalStickyId(msg.id);
+}
+
+async function scheduleDelete(msg: Message) {
+  if (msg.id === aiTerminalStickyId) return;
+  const existing = aiTerminalDeleteTimers.get(msg.id);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    aiTerminalDeleteTimers.delete(msg.id);
+    msg.delete().catch((err) => {
+      if (err?.code !== 10008) console.error("[AI] Delete failed:", err);
+    });
+  }, 60_000);
+  aiTerminalDeleteTimers.set(msg.id, timer);
+}
+
+// === YouTube persistent video ID tracking (last 50) ==========================
 function loadYtPostedIds(): string[] {
   try {
     if (fs.existsSync(YT_POSTED_VIDEO_IDS_FILE)) {
@@ -1269,6 +1355,14 @@ function buildServerGuideEmbed(): EmbedBuilder {
         value:
           "> The live board in <#" + PESETAS_LB_CHANNEL_ID + "> displays the top 10 richest survivors holding the most Pesetas.\n" +
           "> The bot updates this automatically and mentions you directly if you break into the top 10.",
+        inline: false,
+      },
+      {
+        name: "☣️ AI TERMINAL",
+        value:
+          "> Head to <#" + AI_TERMINAL_CHANNEL_ID + "> to access the **Umbrella Corporation AI mainframe**.\n" +
+          "> Mention `@Umbrella` to ask any Resident Evil lore question — from obscure files to character backstories.\n" +
+          "> The terminal auto-wipes all logs after 60 seconds for server security.",
         inline: false,
       },
       {
@@ -1953,6 +2047,19 @@ client.once("ready", async () => {
     updateTicketPanel(),
   ]);
 
+  // AI Terminal — restore sticky embed
+  aiTerminalStickyId = loadAiTerminalStickyId();
+  const aiChannel = await client.channels.fetch(AI_TERMINAL_CHANNEL_ID).catch(() => null);
+  if (aiChannel && aiTerminalStickyId) {
+    try {
+      await (aiChannel as TextChannel).messages.delete(aiTerminalStickyId);
+    } catch { /* already gone */ }
+  }
+  if (aiChannel) {
+    await postOrUpdateStickyEmbed(aiChannel as TextChannel);
+    console.log("[AI] Terminal sticky embed posted.");
+  }
+
   // Resume pending 24h dead-role timers + start auto boss spawn
   const guild = client.guilds.cache.first();
   if (guild) {
@@ -2304,6 +2411,33 @@ client.on("interactionCreate", async (interaction: Interaction) => {
 // ============================================================
 client.on("messageCreate", async (message: Message) => {
   if (message.author.bot) return;
+
+  // ── AI Terminal ─────────────────────────────────────────────────────────────
+  if (message.channelId === AI_TERMINAL_CHANNEL_ID) {
+    // Schedule auto-delete for every non-sticky message
+    await scheduleDelete(message);
+
+    // If user mentions the bot, call Gemini
+    const botMention = client.user ? `<@${client.user.id}>` : "";
+    const botMentionNick = client.user ? `<@!${client.user.id}>` : "";
+    const isMentioned = message.content.includes(botMention) || message.content.includes(botMentionNick);
+
+    if (isMentioned) {
+      const cleanText = message.content.replace(new RegExp(`<@!?${client.user?.id}>`, "g"), "").trim();
+      const question = cleanText || "Hello";
+      console.log(`[AI] ${message.author.tag}: ${question.slice(0, 80)}...`);
+
+      const aiReply = await callGemini(question);
+      const replyMsg = await (message.channel as TextChannel).send(aiReply);
+      await scheduleDelete(replyMsg);
+      await postOrUpdateStickyEmbed(message.channel as TextChannel);
+      return; // don't process as a command
+    }
+
+    // After any user message, repost the sticky embed at the bottom
+    await postOrUpdateStickyEmbed(message.channel as TextChannel);
+    return; // stop here — commands don't work in the AI terminal
+  }
 
   // ── Media mirror ─────────────────────────────────────────────────────────────
   // Forward uploads/links from the source channel to the YT notifier channel as
