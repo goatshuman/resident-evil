@@ -1,0 +1,16 @@
+services:
+    - type: web
+      name: resident-evil-bot
+      runtime: node
+      buildCommand: bash render-build.sh
+      startCommand: node --enable-source-maps ./artifacts/api-server/dist/index.mjs
+      envVars:
+        - key: DISCORD_BOT_TOKEN
+          sync: false
+        - key: DISCORD_WELCOME_CHANNEL_ID
+          sync: false
+        - key: DISCORD_NEWS_CHANNEL_ID
+          sync: false
+        - key: GEMINI_API_KEY
+          sync: false
+  
