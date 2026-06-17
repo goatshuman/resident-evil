@@ -2705,8 +2705,4 @@ client.on("guildMemberAdd", async (member) => {
   } catch (err) { console.error("Error sending welcome embed:", err); }
 });
 
-if (!BOT_DISABLED) {
-    client.login(token!);
-  } else {
-    console.error("[Bot] Startup skipped — one or more required env vars are missing. Set DISCORD_BOT_TOKEN, DISCORD_WELCOME_CHANNEL_ID, and DISCORD_NEWS_CHANNEL_ID in your Render environment variables.");
-  }
+client.login(token);
