@@ -3,7 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import esbuildPluginPino from "esbuild-plugin-pino";
-import { rm, copyFile } from "node:fs/promises";
+import { rm, copyFile, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
 globalThis.require = createRequire(import.meta.url);
@@ -121,11 +122,17 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
 }
 
 async function copyAssets() {
-  const assets = ["bear-trap.png", "merchant.png", "re4-logo.png"];
   const srcDir = path.resolve(artifactDir, "src");
   const distDir = path.resolve(artifactDir, "dist");
-  for (const asset of assets) {
-    await copyFile(path.join(srcDir, asset), path.join(distDir, asset));
+  const files = await readdir(srcDir);
+  const images = files.filter(f => /\.(png|jpg|jpeg|gif|webp|json)$/.test(f));
+  for (const asset of images) {
+    const src = path.join(srcDir, asset);
+    const dest = path.join(distDir, asset);
+    if (existsSync(src)) {
+      await copyFile(src, dest);
+      console.log(`Copied asset: ${asset}`);
+    }
   }
 }
 
