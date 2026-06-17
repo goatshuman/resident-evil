@@ -1820,21 +1820,35 @@ async function fetchAndBroadcastNews() {
 
   // Only skip articles posted in the last MAX_RECENT_POSTS — no permanent blacklist
   const recentUrls = new Set(loadPostedUrls());
+  const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // only articles from the last 7 days
+  const now = Date.now();
+
   const allItems: RssItem[] = [];
   for (const feedUrl of NEWS_FEEDS) {
     const items = await fetchFeedItems(feedUrl);
-    allItems.push(...items.filter((i) => NEWS_KEYWORDS.test(i.title || "") || NEWS_KEYWORDS.test(i.description || "")));
+    allItems.push(
+      ...items.filter((i) => {
+        if (!NEWS_KEYWORDS.test(i.title || "") && !NEWS_KEYWORDS.test(i.description || "")) return false;
+        // Drop articles with no date or older than 7 days
+        if (i.pubDate) {
+          const age = now - new Date(i.pubDate).getTime();
+          if (isNaN(age) || age > MAX_AGE_MS) return false;
+        }
+        return true;
+      })
+    );
   }
 
-  if (!allItems.length) { console.log("[News] No RE articles found."); return; }
+  if (!allItems.length) { console.log("[News] No recent RE articles found (all older than 7 days)."); return; }
 
-  // Shuffle so a different article surfaces every time
-  for (let i = allItems.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [allItems[i], allItems[j]] = [allItems[j], allItems[i]];
-  }
+  // Sort newest-first, then shuffle within same-day articles so we get variety
+  allItems.sort((a, b) => {
+    const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
+    const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
+    return tb - ta;
+  });
 
-  console.log(`[News] ${allItems.length} RE articles found, ${recentUrls.size} recently posted.`);
+  console.log(`[News] ${allItems.length} recent RE articles found, ${recentUrls.size} recently posted.`);
 
   let posted = 0;
   for (const item of allItems) {
