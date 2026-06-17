@@ -387,7 +387,8 @@ interface BossState {
   hp: number;
   maxHp: number;
   guildId: string;
-  participants: Set<string>;
+  enrolledMembers: Set<string>;       // all members assigned Boss Fight role at spawn
+  participants: Set<string>;          // members who actually attacked
   participantBestDamage: Map<string, number>;
   ended: boolean;
   timer: NodeJS.Timeout | null;
@@ -597,28 +598,40 @@ async function spawnBoss(guild: Guild) {
     return;
   }
 
+  // Only enroll members who are currently online, idle, or DND — never offline members.
+  const onlineSurvivors = survivorMembers.filter((m) => {
+    const status = m.presence?.status;
+    return status === "online" || status === "idle" || status === "dnd";
+  });
+
   activeBoss = {
     bossName,
     channelId: bossChannel.id,
     hp: maxHp,
     maxHp,
     guildId: guild.id,
+    enrolledMembers: new Set(onlineSurvivors.map((m) => m.id)),
     participants: new Set(),
     participantBestDamage: new Map(),
     ended: false,
     timer: null,
   };
 
-  // Assign Boss Fight role to Survivor members so they get the arena-only view.
-  // (Only Survivor members who actually have the role; this is fast since the list is already fetched.)
+  // Assign Boss Fight role to online survivors AND strip their Survivor role so they
+  // can only see the boss arena channel until the fight ends.
   await Promise.all(
-    survivorMembers.map((m) =>
-      m.roles.add(BOSS_FIGHT_ROLE_ID, "Boss fight started").catch((err) =>
-        console.error(`[Boss] Role grant failed for ${m.user.tag}:`, err)
-      )
+    onlineSurvivors.map((m) =>
+      Promise.all([
+        m.roles.add(BOSS_FIGHT_ROLE_ID, "Boss fight started").catch((err) =>
+          console.error(`[Boss] Role grant failed for ${m.user.tag}:`, err)
+        ),
+        m.roles.remove(SURVIVOR_ROLE_ID, "Boss fight: stripped for arena lockdown").catch((err) =>
+          console.error(`[Boss] Survivor strip failed for ${m.user.tag}:`, err)
+        ),
+      ])
     )
   );
-  console.log(`[Boss] Granted Boss Fight role to ${survivorMembers.size} survivor(s).`);
+  console.log(`[Boss] Enrolled ${onlineSurvivors.size} online survivor(s) (${survivorMembers.size - onlineSurvivors.size} offline — skipped).`);
 
   // Lock regular channels for Survivor role via channel permission overwrites.
   await lockChannelsForBossFight(guild, bossChannel.id);
@@ -651,99 +664,69 @@ function calcBossReward(bestDamage: number): number {
   return randInt(5000, 15000);                            // base (no weapon)
 }
 
-async function bossVictory(guild: Guild) {
-  if (!activeBoss || activeBoss.ended) return;
-  activeBoss.ended = true;
-  if (activeBoss.timer) clearTimeout(activeBoss.timer);
-
-  const { bossName, channelId, participants, participantBestDamage } = activeBoss;
-  activeBoss = null;
-
-  // Award Pesetas scaled by each participant's best weapon damage
-  for (const userId of participants) {
-    const bestDamage = participantBestDamage.get(userId) ?? 50;
-    const reward = calcBossReward(bestDamage);
-    const profile = loadUserProfile(userId);
-    profile.pesetas += reward;
-    saveUserProfile(userId, profile);
-    console.log(`[Boss] Rewarded ${userId}: ${reward.toLocaleString()} Pesetas (best damage: ${bestDamage})`);
-  }
-
-  // Restore regular channel access for Survivor role and delete the arena.
-  await unlockChannelsAfterBossFight(guild, channelId);
-
-  // Remove Boss Fight role from all participants
-  try {
-    const members = await guild.members.fetch();
-    await Promise.all(
-      Array.from(participants).map((id) => {
-        const m = members.get(id);
-        if (m && m.roles.cache.has(BOSS_FIGHT_ROLE_ID)) {
-          return m.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight ended: victory").catch(() => {});
-        }
-        return Promise.resolve();
-      })
-    );
-    console.log(`[Boss] Removed Boss Fight role from ${participants.size} participant(s).`);
-  } catch { }
-
-  // Delete boss channel
-  try {
-    const ch = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
-    if (ch) await ch.delete("Boss fight ended: victory");
-  } catch {}
-
-  console.log(`[Boss] VICTORY: ${bossName} defeated. ${participants.size} player(s) rewarded (tiered Pesetas).`);
-  updateBotPresence();
-}
-
 async function bossDefeat(guild: Guild, _reason: "timeout" | "admin") {
   if (!activeBoss || activeBoss.ended) return;
   activeBoss.ended = true;
   if (activeBoss.timer) clearTimeout(activeBoss.timer);
 
-  const { bossName, channelId, participants } = activeBoss;
+  const { bossName, channelId, enrolledMembers, participants, participantBestDamage } = activeBoss;
   activeBoss = null;
 
   const deadTimers = loadDeadRoleTimers();
 
-  // Restore regular channels for everyone first (removes the Survivor deny overwrite).
+  // Restore regular channels for everyone first.
   await unlockChannelsAfterBossFight(guild, channelId);
 
-  // Quarantine ONLY the players who actually participated — no need to touch the
-  // entire server roster.  Non-participants just get their channels back above.
-  if (participants.size > 0) {
-    try {
-      const members = await guild.members.fetch();
-      const now = Date.now();
+  try {
+    const members = await guild.members.fetch();
+    const now = Date.now();
 
-      const participantMembers = Array.from(participants)
-        .map((id) => members.get(id))
-        .filter((m): m is GuildMember => !!m && !m.user.bot);
+    const winners: GuildMember[] = [];   // enrolled + attacked → Survivor role restored + Pesetas
+    const losers: GuildMember[] = [];    // enrolled but didn't attack → Dead role
 
-      // Record quarantine timers synchronously, then fire role changes in parallel
-      for (const member of participantMembers) {
-        const existing = deadTimers.findIndex((t) => t.userId === member.id);
-        if (existing >= 0) deadTimers[existing].assignedAt = now;
-        else deadTimers.push({ userId: member.id, assignedAt: now });
-        scheduleDeadRoleRelease(guild, member.id, now);
+    for (const userId of enrolledMembers) {
+      const m = members.get(userId);
+      if (!m || m.user.bot) continue;
+      if (participants.has(userId)) {
+        winners.push(m);
+      } else {
+        losers.push(m);
       }
-
-      await Promise.all(
-        participantMembers.flatMap((member) => [
-          member.roles.remove(SURVIVOR_ROLE_ID, "Boss fight defeat").catch((err) =>
-            console.error(`[Boss] Defeat remove Survivor failed for ${member.user.tag}:`, err)
-          ),
-          member.roles.add(DEAD_ROLE_ID, "Boss fight defeat").catch((err) =>
-            console.error(`[Boss] Defeat add Dead failed for ${member.user.tag}:`, err)
-          ),
-          member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight defeat").catch(() => {}),
-        ])
-      );
-      console.log(`[Boss] Quarantined ${participantMembers.length} participant(s).`);
-    } catch (err) {
-      console.error("[Boss] Failed to quarantine participants:", err);
     }
+
+    // Winners: restore Survivor role, remove Boss Fight role, award Pesetas
+    await Promise.all(
+      winners.flatMap((member) => {
+        const bestDamage = participantBestDamage.get(member.id) ?? 50;
+        const reward = calcBossReward(bestDamage);
+        const profile = loadUserProfile(member.id);
+        profile.pesetas += reward;
+        saveUserProfile(member.id, profile);
+        console.log(`[Boss] Winner ${member.user.tag}: +${reward.toLocaleString()} Pesetas (best dmg: ${bestDamage})`);
+        return [
+          member.roles.add(SURVIVOR_ROLE_ID, "Boss fight: survived").catch(() => {}),
+          member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight: survived").catch(() => {}),
+        ];
+      })
+    );
+    console.log(`[Boss] Restored Survivor role to ${winners.length} winner(s).`);
+
+    // Losers: quarantine with Dead role, no Survivor role restored
+    for (const member of losers) {
+      const existing = deadTimers.findIndex((t) => t.userId === member.id);
+      if (existing >= 0) deadTimers[existing].assignedAt = now;
+      else deadTimers.push({ userId: member.id, assignedAt: now });
+      scheduleDeadRoleRelease(guild, member.id, now);
+    }
+    await Promise.all(
+      losers.flatMap((member) => [
+        member.roles.add(DEAD_ROLE_ID, "Boss fight: failed to defeat").catch(() => {}),
+        member.roles.remove(BOSS_FIGHT_ROLE_ID, "Boss fight: failed to defeat").catch(() => {}),
+      ])
+    );
+    console.log(`[Boss] Quarantined ${losers.length} loser(s) who did not fight.`);
+  } catch (err) {
+    console.error("[Boss] Failed to resolve fight outcomes:", err);
   }
 
   saveDeadRoleTimers(deadTimers);
@@ -751,10 +734,10 @@ async function bossDefeat(guild: Guild, _reason: "timeout" | "admin") {
   // Delete boss channel
   try {
     const ch = guild.channels.cache.get(channelId) ?? await guild.channels.fetch(channelId).catch(() => null);
-    if (ch) await ch.delete("Boss fight ended: defeat");
+    if (ch) await ch.delete("Boss fight ended");
   } catch {}
 
-  console.log(`[Boss] DEFEAT: ${bossName} survived. Players quarantined for 24h.`);
+  console.log(`[Boss] FIGHT OVER: ${bossName}. Timer expired.`);
   updateBotPresence();
 }
 
@@ -2393,8 +2376,15 @@ client.on("interactionCreate", async (interaction: Interaction) => {
       ...(attackImgFile ? { files: [attackImgFile] } : {}),
     });
 
-    if (hp <= 0 && interaction.guild) {
-      await bossVictory(interaction.guild);
+    // Boss HP reached 0 but fight runs for the full 1-minute timer — no early end.
+    // Everyone enrolled fights until time is up; attackers win, non-attackers get Dead role.
+    if (hp <= 0) {
+      await message.edit({
+        content: `> ☠️ **${bossName.toUpperCase()} IS DOWN TO 0 HP — KEEP FIGHTING! Timer still running!**`,
+        embeds: [buildBossEmbed(bossName, 0, maxHp)],
+        components: message.components,
+        ...(attackImgFile ? { files: [attackImgFile] } : {}),
+      }).catch(() => {});
     }
     return;
   }
