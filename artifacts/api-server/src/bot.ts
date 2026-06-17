@@ -1751,6 +1751,40 @@ interface RssItem {
   "media:content"?: { "@_url"?: string } | Array<{ "@_url"?: string }>;
   "media:thumbnail"?: { "@_url"?: string };
   enclosure?: { "@_url"?: string };
+  source?: { "@_url"?: string; "#text"?: string } | string;
+}
+
+// Maps source outlet domains → their own RSS feed so we can fetch real images
+const OUTLET_RSS_MAP: Record<string, string> = {
+  "ign.com":           "https://feeds.ign.com/ign/news",
+  "eurogamer.net":     "https://www.eurogamer.net/rss",
+  "gamesradar.com":    "https://www.gamesradar.com/rss/",
+  "kotaku.com":        "https://kotaku.com/rss",
+  "polygon.com":       "https://www.polygon.com/rss/index.xml",
+  "destructoid.com":   "https://www.destructoid.com/feed/",
+  "vg247.com":         "https://www.vg247.com/feed",
+  "gameinformer.com":  "https://www.gameinformer.com/rss.xml",
+};
+
+// For a Google News item, try to find the same article on the outlet's own RSS and return its image
+async function fetchOutletImageForGoogleNewsItem(item: RssItem): Promise<string | null> {
+  try {
+    const src = item.source;
+    const sourceUrl: string | undefined = typeof src === "string" ? undefined : src?.["@_url"];
+    if (!sourceUrl) return null;
+    const domain = Object.keys(OUTLET_RSS_MAP).find((d) => sourceUrl.includes(d));
+    if (!domain) return null;
+    const feedUrl = OUTLET_RSS_MAP[domain];
+    const outletItems = await fetchFeedItems(feedUrl);
+    // Normalise title for fuzzy match (strip source suffix, lowercase, first 40 chars)
+    const normTitle = (item.title ?? "").replace(/ - [^-]+$/, "").toLowerCase().slice(0, 40);
+    const match = outletItems.find((oi) => {
+      const ot = (oi.title ?? "").toLowerCase().slice(0, 40);
+      return ot.includes(normTitle.slice(0, 30)) || normTitle.includes(ot.slice(0, 30));
+    });
+    if (!match) return null;
+    return extractRssImage(match);
+  } catch { return null; }
 }
 
 function extractRssImage(item: RssItem): string | null {
@@ -1841,8 +1875,12 @@ async function fetchAndBroadcastNews() {
 
   if (!allItems.length) { console.log("[News] No recent RE articles found (all older than 7 days)."); return; }
 
-  // Sort newest-first, then shuffle within same-day articles so we get variety
+  // Sort: articles with RSS images first, then by newest date
+  const hasRssImage = (i: RssItem) => !!extractRssImage(i);
   allItems.sort((a, b) => {
+    const imgA = hasRssImage(a) ? 1 : 0;
+    const imgB = hasRssImage(b) ? 1 : 0;
+    if (imgB !== imgA) return imgB - imgA; // image-bearing items first
     const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
     const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
     return tb - ta;
@@ -1866,14 +1904,19 @@ async function fetchAndBroadcastNews() {
       const redditImg = await fetchRedditThumbnail(rawUrl);
       if (redditImg) imageUrl = redditImg;
     }
+    // Google News item: look up the real outlet's RSS for a matching article image
+    if (!imageUrl && rawUrl.includes("news.google.com")) {
+      imageUrl = await fetchOutletImageForGoogleNewsItem(item);
+      if (imageUrl) console.log(`[News] Got outlet image for Google News item: ${imageUrl}`);
+    }
     // Description may contain an image URL
     if (!imageUrl) {
       const desc = String(item.description ?? "");
       const urlMatch = desc.match(/https?:\/\/[^\s\"]+\.(?:png|jpg|jpeg|gif|webp)/i);
       if (urlMatch) imageUrl = urlMatch[0];
     }
-    // Last resort: OG scrape
-    if (!imageUrl) imageUrl = await fetchOgImage(rawUrl);
+    // Last resort: OG scrape (only for non-Google-News URLs — those never yield real images)
+    if (!imageUrl && !rawUrl.includes("news.google.com")) imageUrl = await fetchOgImage(rawUrl);
 
     const embed = new EmbedBuilder()
       .setColor(0xff0000)
