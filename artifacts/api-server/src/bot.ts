@@ -753,12 +753,13 @@ function scheduleNextBossSpawn(guild: Guild) {
   const ONE_HOUR = 60 * 60 * 1000;
   const FIVE_MIN = 5 * 60 * 1000;
 
-  async function sendCountdown(text: string) {
+  async function sendCountdown(text: string, deleteAfterMs: number) {
     if (activeBoss && !activeBoss.ended) return; // fight already in progress
     try {
       const ch = await client.channels.fetch(BOSS_ANNOUNCE_CHANNEL_ID).catch(() => null);
       if (ch && typeof (ch as any).send === "function") {
-        await (ch as TextChannel).send({ content: text });
+        const msg = await (ch as TextChannel).send({ content: text });
+        setTimeout(() => msg.delete().catch(() => {}), deleteAfterMs);
       }
     } catch {}
   }
@@ -766,7 +767,8 @@ function scheduleNextBossSpawn(guild: Guild) {
   if (delay > ONE_HOUR) {
     setTimeout(() => {
       sendCountdown(
-        `<@&${SURVIVOR_ROLE_ID}> ⚠️ **BIOHAZARD ALERT** — A boss encounter will begin in **1 hour**. Prepare your weapons, survivor.`
+        `<@&${SURVIVOR_ROLE_ID}> ⚠️ **BIOHAZARD ALERT** — A boss encounter will begin in **1 hour**. Prepare your weapons, survivor.`,
+        10 * 60 * 1000 // delete after 10 minutes
       );
     }, delay - ONE_HOUR);
   }
@@ -774,7 +776,8 @@ function scheduleNextBossSpawn(guild: Guild) {
   if (delay > FIVE_MIN) {
     setTimeout(() => {
       sendCountdown(
-        `<@&${SURVIVOR_ROLE_ID}> 🔴 **BOSS FIGHT IN 5 MINUTES** — Take your positions. This is not a drill.`
+        `<@&${SURVIVOR_ROLE_ID}> 🔴 **BOSS FIGHT IN 5 MINUTES** — Take your positions. This is not a drill.`,
+        5 * 60 * 1000 // delete after 5 minutes
       );
     }, delay - FIVE_MIN);
   }
