@@ -741,12 +741,44 @@ async function bossDefeat(guild: Guild, _reason: "timeout" | "admin") {
   updateBotPresence();
 }
 
+const BOSS_ANNOUNCE_CHANNEL_ID = "1514949694730670191";
+
 function scheduleNextBossSpawn(guild: Guild) {
   const delay = randInt(BOSS_AUTO_SPAWN_MIN_MS, BOSS_AUTO_SPAWN_MAX_MS);
   const mins = Math.round(delay / 60000);
   nextSpawnAt = Date.now() + delay;
   console.log(`[Boss] Next auto-spawn in ${mins} minutes.`);
   updateBotPresence();
+
+  const ONE_HOUR = 60 * 60 * 1000;
+  const FIVE_MIN = 5 * 60 * 1000;
+
+  async function sendCountdown(text: string) {
+    if (activeBoss && !activeBoss.ended) return; // fight already in progress
+    try {
+      const ch = await client.channels.fetch(BOSS_ANNOUNCE_CHANNEL_ID).catch(() => null);
+      if (ch && typeof (ch as any).send === "function") {
+        await (ch as TextChannel).send({ content: text });
+      }
+    } catch {}
+  }
+
+  if (delay > ONE_HOUR) {
+    setTimeout(() => {
+      sendCountdown(
+        `<@&${SURVIVOR_ROLE_ID}> ⚠️ **BIOHAZARD ALERT** — A boss encounter will begin in **1 hour**. Prepare your weapons, survivor.`
+      );
+    }, delay - ONE_HOUR);
+  }
+
+  if (delay > FIVE_MIN) {
+    setTimeout(() => {
+      sendCountdown(
+        `<@&${SURVIVOR_ROLE_ID}> 🔴 **BOSS FIGHT IN 5 MINUTES** — Take your positions. This is not a drill.`
+      );
+    }, delay - FIVE_MIN);
+  }
+
   setTimeout(async () => {
     if (!activeBoss || activeBoss.ended) {
       await spawnBoss(guild);
@@ -1624,18 +1656,42 @@ async function editExistingMessage(
 // ============================================================
 // NEWS
 // ============================================================
-async function fetchOgImage(url: string): Promise<string | null> {
+async function resolveRedirectUrl(url: string): Promise<string> {
   try {
     const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "text/html" },
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    // res.url is the final URL after all redirects
+    return res.url && res.url !== url ? res.url : url;
+  } catch { return url; }
+}
+
+async function fetchOgImage(url: string): Promise<string | null> {
+  try {
+    // Google News links are redirect wrappers — resolve to real article URL first
+    const fetchUrl = url.includes("news.google.com") ? await resolveRedirectUrl(url) : url;
+    const res = await fetch(fetchUrl, {
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+      },
       signal: AbortSignal.timeout(10000),
     });
     const html = await res.text();
     const root = parseHtml(html);
     const img =
       root.querySelector('meta[property="og:image"]')?.getAttribute("content") ||
+      root.querySelector('meta[property="og:image:url"]')?.getAttribute("content") ||
       root.querySelector('meta[name="twitter:image:src"]')?.getAttribute("content") ||
       root.querySelector('meta[name="twitter:image"]')?.getAttribute("content") ||
+      root.querySelector('meta[itemprop="image"]')?.getAttribute("content") ||
       null;
     if (img && img.startsWith("http")) return img;
     return null;
