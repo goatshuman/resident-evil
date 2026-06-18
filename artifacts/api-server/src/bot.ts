@@ -1445,7 +1445,12 @@ function buildBypassShopEmbed(): EmbedBuilder {
     .setFooter({ text: "UMBRELLA QUARANTINE CONTROL — BYPASS TERMINAL" });
 }
 
-function buildServerGuideEmbed(): EmbedBuilder {
+function buildServerGuideEmbed(guild?: Guild | null): EmbedBuilder {
+  // Build a name→mention map so role names become <@&ID> tags in the embed
+  const roleTag = (name: string): string => {
+    const r = guild?.roles.cache.find((r) => r.name === name);
+    return r ? `<@&${r.id}>` : `**${name}**`;
+  };
   return new EmbedBuilder()
     .setColor(0xff0000)
     .setTitle("📝 RESIDENT EVIL COMMUNITY — SERVER MASTER GUIDE")
@@ -1518,16 +1523,16 @@ function buildServerGuideEmbed(): EmbedBuilder {
         value:
           "> Every message you send in any non-restricted channel is counted. Reach a milestone and you are **automatically promoted** — your previous rank role is removed and the new one takes its place.\n" +
           "> \n" +
-          "> **50** msgs → R.P.D. Officer\n" +
-          "> **250** msgs → S.T.A.R.S. Recruit\n" +
-          "> **500** msgs → S.T.A.R.S. Bravo Team\n" +
-          "> **1,000** msgs → S.T.A.R.S. Alpha Team\n" +
-          "> **2,000** msgs → Secret Service Agent\n" +
-          "> **3,500** msgs → B.S.A.A. Trainee\n" +
-          "> **5,000** msgs → B.S.A.A. Operator\n" +
-          "> **7,500** msgs → Hound Wolf Squad\n" +
-          "> **10,000** msgs → D.S.O. Agent\n" +
-          "> **20,000** msgs → B.S.A.A. Commander\n" +
+          `> **50** msgs → ${roleTag("R.P.D. Officer")}\n` +
+          `> **250** msgs → ${roleTag("S.T.A.R.S. Recruit")}\n` +
+          `> **500** msgs → ${roleTag("S.T.A.R.S. Bravo Team")}\n` +
+          `> **1,000** msgs → ${roleTag("S.T.A.R.S. Alpha Team")}\n` +
+          `> **2,000** msgs → ${roleTag("Secret Service Agent")}\n` +
+          `> **3,500** msgs → ${roleTag("B.S.A.A. Trainee")}\n` +
+          `> **5,000** msgs → ${roleTag("B.S.A.A. Operator")}\n` +
+          `> **7,500** msgs → ${roleTag("Hound Wolf Squad")}\n` +
+          `> **10,000** msgs → ${roleTag("D.S.O. Agent")}\n` +
+          `> **20,000** msgs → ${roleTag("B.S.A.A. Commander")}\n` +
           "> \n" +
           "> *Only the highest earned rank is displayed — keep talking to climb the ladder.*",
         inline: false,
@@ -1548,7 +1553,8 @@ function buildServerGuideEmbed(): EmbedBuilder {
 }
 
 async function updateServerGuide() {
-  const embed = buildServerGuideEmbed();
+  const guild = client.guilds.cache.first() ?? null;
+  const embed = buildServerGuideEmbed(guild);
   const existingId = loadPersistentMsgId(SERVER_GUIDE_MSG_ID_FILE, "1515332347707265236");
 
   if (existingId) {
