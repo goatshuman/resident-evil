@@ -111,6 +111,20 @@ const YT_POSTED_VIDEO_IDS_FILE = path.join(SRC_DIR, "yt-posted-video-ids.json");
 const NEWS_INTERVAL_MS       = 12 * 60 * 60 * 1000;
 const SHOP_INTERVAL_MS       = 10 * 60 * 1000;
 const CHAT_EARN_COOLDOWN_MS  = 60 * 1000;
+
+// ── Leveling milestones ─────────────────────────────────────────────────────
+const LEVEL_ROLES = [
+  { messages: 50,    name: "R.P.D. Officer",       color: 0x3498DB },
+  { messages: 250,   name: "S.T.A.R.S. Recruit",   color: 0x2ECC71 },
+  { messages: 500,   name: "S.T.A.R.S. Bravo Team",color: 0x1ABC9C },
+  { messages: 1000,  name: "S.T.A.R.S. Alpha Team", color: 0x27AE60 },
+  { messages: 2000,  name: "Secret Service Agent",  color: 0xE67E22 },
+  { messages: 3500,  name: "B.S.A.A. Trainee",     color: 0x9B59B6 },
+  { messages: 5000,  name: "B.S.A.A. Operator",    color: 0x8E44AD },
+  { messages: 7500,  name: "Hound Wolf Squad",      color: 0xE74C3C },
+  { messages: 10000, name: "D.S.O. Agent",          color: 0xC0392B },
+  { messages: 20000, name: "B.S.A.A. Commander",   color: 0xF1C40F },
+] as const;
 const BOSS_FIGHT_DURATION_MS    = 60 * 1000;
 const DEAD_ROLE_EXPIRY_MS       = 24 * 60 * 60 * 1000;
 const BOSS_AUTO_SPAWN_MIN_MS    = 2 * 60 * 60 * 1000;
@@ -326,6 +340,7 @@ interface UserProfile {
   current_weapons: GameWeapon[];
   quarantine_pass: boolean;
   _lastEarnTime?: number;
+  messageCount?: number;
 }
 
 interface GameData {
@@ -358,6 +373,67 @@ function saveUserProfile(userId: string, profile: UserProfile) {
   const data = loadGameData();
   data.users[userId] = profile;
   saveGameData(data);
+}
+
+// ============================================================
+// LEVELING SYSTEM
+// ============================================================
+
+async function ensureLevelRoles(guild: Guild): Promise<void> {
+  for (const tier of LEVEL_ROLES) {
+    const existing = guild.roles.cache.find((r) => r.name === tier.name);
+    if (!existing) {
+      await guild.roles.create({ name: tier.name, color: tier.color, reason: "Level role auto-create" }).catch((e) =>
+        console.error(`[Level] Failed to create role ${tier.name}:`, e)
+      );
+      console.log(`[Level] Created role: ${tier.name}`);
+    }
+  }
+}
+
+async function checkAndAssignLevelRole(guild: Guild, userId: string, messageCount: number): Promise<void> {
+  try {
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (!member || member.user.bot) return;
+
+    // Find the highest tier the user has now reached (ascending order, so last match wins)
+    let earnedTier: typeof LEVEL_ROLES[number] | null = null;
+    for (const tier of LEVEL_ROLES) {
+      if (messageCount >= tier.messages) earnedTier = tier;
+    }
+    if (!earnedTier) return; // hasn't hit any milestone yet
+
+    // Check if they already have this role — skip if so
+    const alreadyHas = member.roles.cache.some((r) => r.name === earnedTier!.name);
+    if (alreadyHas) return;
+
+    // Check if this is a NEW milestone crossing (previous count was just below)
+    const prevCount = messageCount - 1;
+    let prevTier: typeof LEVEL_ROLES[number] | null = null;
+    for (const tier of LEVEL_ROLES) {
+      if (prevCount >= tier.messages) prevTier = tier;
+    }
+    if (prevTier?.name === earnedTier.name) return; // same tier, no change
+
+    // Assign the new role
+    const newRole = guild.roles.cache.find((r) => r.name === earnedTier!.name);
+    if (newRole) {
+      await member.roles.add(newRole, `Level up: ${messageCount} messages`).catch(() => {});
+    }
+
+    // Remove all lower-tier roles
+    const allLevelRoleNames = new Set(LEVEL_ROLES.map((t) => t.name));
+    const toRemove = member.roles.cache.filter(
+      (r) => allLevelRoleNames.has(r.name) && r.name !== earnedTier!.name
+    );
+    for (const [, role] of toRemove) {
+      await member.roles.remove(role, "Level up: replacing lower tier").catch(() => {});
+    }
+
+    console.log(`[Level] ${member.user.tag} reached ${earnedTier.name} at ${messageCount} messages.`);
+  } catch (err) {
+    console.error("[Level] checkAndAssignLevelRole error:", err);
+  }
 }
 
 // ============================================================
@@ -1427,6 +1503,25 @@ function buildServerGuideEmbed(): EmbedBuilder {
         inline: false,
       },
       {
+        name: "🏅 MESSAGE LEVELING — RANK UP AS YOU CHAT",
+        value:
+          "> Every message you send in any non-restricted channel is counted. Reach a milestone and you are **automatically promoted** — your previous rank role is removed and the new one takes its place.\n" +
+          "> \n" +
+          "> **50** msgs → R.P.D. Officer\n" +
+          "> **250** msgs → S.T.A.R.S. Recruit\n" +
+          "> **500** msgs → S.T.A.R.S. Bravo Team\n" +
+          "> **1,000** msgs → S.T.A.R.S. Alpha Team\n" +
+          "> **2,000** msgs → Secret Service Agent\n" +
+          "> **3,500** msgs → B.S.A.A. Trainee\n" +
+          "> **5,000** msgs → B.S.A.A. Operator\n" +
+          "> **7,500** msgs → Hound Wolf Squad\n" +
+          "> **10,000** msgs → D.S.O. Agent\n" +
+          "> **20,000** msgs → B.S.A.A. Commander\n" +
+          "> \n" +
+          "> *Only the highest earned rank is displayed — keep talking to climb the ladder.*",
+        inline: false,
+      },
+      {
         name: "🎫 SUPPORT & REPORTS",
         value:
           "> Need help, want to report a player, or have a suggestion? Head to <#" + TICKET_PANEL_CHANNEL_ID + "> and open a ticket.\n" +
@@ -2166,9 +2261,12 @@ async function updateShop() {
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user?.tag}`);
 
-  // Ensure all weapon roles exist before anything else
+  // Ensure all weapon roles and level roles exist before anything else
   const guild0 = client.guilds.cache.first();
-  if (guild0) await ensureWeaponRoles(guild0);
+  if (guild0) {
+    await ensureWeaponRoles(guild0);
+    await ensureLevelRoles(guild0);
+  }
 
   await Promise.all([
     updateHoneypotWarning(),
@@ -2775,17 +2873,33 @@ client.on("messageCreate", async (message: Message) => {
     }
   }
 
-  // Chat economy — all non-honeypot channels
+  // Chat economy + message counting — all non-honeypot channels
   const profile = loadUserProfile(message.author.id);
   const now = Date.now();
+
+  // Always count messages (regardless of economy cooldown)
+  profile.messageCount = (profile.messageCount ?? 0) + 1;
+  const currentCount = profile.messageCount;
+
   const lastEarn = profile._lastEarnTime ?? 0;
-  if (now - lastEarn < CHAT_EARN_COOLDOWN_MS) return;
+  if (now - lastEarn < CHAT_EARN_COOLDOWN_MS) {
+    // Still save the updated message count even when on cooldown
+    saveUserProfile(message.author.id, profile);
+    // Check level milestone for every message
+    const guild = message.guild;
+    if (guild) checkAndAssignLevelRole(guild, message.author.id, currentCount).catch(() => {});
+    return;
+  }
 
   const earned = randInt(5, 15);
   profile.pesetas += earned;
   profile._lastEarnTime = now;
   saveUserProfile(message.author.id, profile);
-  console.log(`[Economy] ${message.author.tag} earned ${earned} pesetas. Balance: ${profile.pesetas}`);
+  console.log(`[Economy] ${message.author.tag} earned ${earned} pesetas. Balance: ${profile.pesetas} | Messages: ${currentCount}`);
+
+  // Check level milestone
+  const guild = message.guild;
+  if (guild) checkAndAssignLevelRole(guild, message.author.id, currentCount).catch(() => {});
 });
 
 // ============================================================
