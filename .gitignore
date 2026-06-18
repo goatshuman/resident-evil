@@ -47,3 +47,6 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Bot runtime data (persists locally, not committed to git)
+artifacts/api-server/data/
