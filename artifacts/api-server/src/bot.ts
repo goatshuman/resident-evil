@@ -65,8 +65,19 @@ const HERO_LEADERBOARD_MSG_ID   = "1515025600408977499";
 const VILLAIN_LEADERBOARD_MSG_ID = "1515025602216857804";
 const SHOP_MSG_ID               = "1515216540297990174";
 
-// ── File paths — all persistent data lives in src/ ──────────────────────────
-const SRC_DIR               = path.join(__dirname, "..", "src");
+// ── File paths — persistent data lives in data/ (never wiped by builds) ──────
+const DATA_DIR = path.join(__dirname, "..", "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+// Seed initial JSON files from bundled dist copies on first run
+for (const _sf of [
+  "resident_evil_game.json", "posted-urls.json",
+  "leaderboard-votes.json", "villain-leaderboard-votes.json", "dead-role-timers.json",
+]) {
+  const _dest = path.join(DATA_DIR, _sf);
+  const _src  = path.join(__dirname, _sf);
+  if (!fs.existsSync(_dest) && fs.existsSync(_src)) fs.copyFileSync(_src, _dest);
+}
+
 const HONEYPOT_BEAR_TRAP_PATH = path.join(__dirname, "bear-trap.png");
 const RE4_LOGO_PATH           = path.join(__dirname, "re4-logo.png");
 const MERCHANT_IMAGE_PATH     = path.join(__dirname, "merchant.png");
@@ -94,18 +105,18 @@ function getTopVillain(votes: Record<string, string[]>): string | undefined {
   const totals = getTotals(votes, VILLAINS);
   return Object.entries(totals).sort((a, b) => b[1] - a[1])[0]?.[0];
 }
-const POSTED_URLS_FILE        = path.join(SRC_DIR, "posted-urls.json");
-const HERO_VOTES_FILE         = path.join(SRC_DIR, "leaderboard-votes.json");
-const VILLAIN_VOTES_FILE      = path.join(SRC_DIR, "villain-leaderboard-votes.json");
-const HONEYPOT_MSG_ID_FILE    = path.join(SRC_DIR, "honeypot-msg-id.json");
-const GAME_DATA_FILE          = path.join(SRC_DIR, "resident_evil_game.json");
-const DEAD_ROLE_TIMERS_FILE   = path.join(SRC_DIR, "dead-role-timers.json");
-const BYPASS_MSG_ID_FILE      = path.join(SRC_DIR, "bypass-shop-msg-id.json");
-const PESETAS_LB_MSG_ID_FILE  = path.join(SRC_DIR, "pesetas-lb-msg-id.json");
-const WEAPON_INFO_MSG_ID_FILE  = path.join(SRC_DIR, "weapon-info-msg-id.json");
-const SERVER_GUIDE_MSG_ID_FILE = path.join(SRC_DIR, "server-guide-msg-id.json");
-const TICKET_PANEL_MSG_ID_FILE = path.join(SRC_DIR, "ticket-panel-msg-id.json");
-const YT_POSTED_VIDEO_IDS_FILE = path.join(SRC_DIR, "yt-posted-video-ids.json");
+const POSTED_URLS_FILE        = path.join(DATA_DIR, "posted-urls.json");
+const HERO_VOTES_FILE         = path.join(DATA_DIR, "leaderboard-votes.json");
+const VILLAIN_VOTES_FILE      = path.join(DATA_DIR, "villain-leaderboard-votes.json");
+const HONEYPOT_MSG_ID_FILE    = path.join(DATA_DIR, "honeypot-msg-id.json");
+const GAME_DATA_FILE          = path.join(DATA_DIR, "resident_evil_game.json");
+const DEAD_ROLE_TIMERS_FILE   = path.join(DATA_DIR, "dead-role-timers.json");
+const BYPASS_MSG_ID_FILE      = path.join(DATA_DIR, "bypass-shop-msg-id.json");
+const PESETAS_LB_MSG_ID_FILE  = path.join(DATA_DIR, "pesetas-lb-msg-id.json");
+const WEAPON_INFO_MSG_ID_FILE  = path.join(DATA_DIR, "weapon-info-msg-id.json");
+const SERVER_GUIDE_MSG_ID_FILE = path.join(DATA_DIR, "server-guide-msg-id.json");
+const TICKET_PANEL_MSG_ID_FILE = path.join(DATA_DIR, "ticket-panel-msg-id.json");
+const YT_POSTED_VIDEO_IDS_FILE = path.join(DATA_DIR, "yt-posted-video-ids.json");
 
 // ── Intervals ────────────────────────────────────────────────────────────────
 const NEWS_INTERVAL_MS       = 12 * 60 * 60 * 1000;
@@ -155,7 +166,7 @@ const RAW_URL_RE = /https?:\/\/[^\s<>"]+/g;
 
 // ── AI Terminal ─────────────────────────────────────────────────────────────
 const AI_TERMINAL_CHANNEL_ID = "1516043914870657146";
-const AI_TERMINAL_STICKY_FILE = path.join(SRC_DIR, "ai-terminal-sticky-msg-id.json");
+const AI_TERMINAL_STICKY_FILE = path.join(DATA_DIR, "ai-terminal-sticky-msg-id.json");
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_SYSTEM_PROMPT =
@@ -1687,6 +1698,13 @@ async function updatePesetasLeaderboard() {
     .sort((a, b) => b.pesetas - a.pesetas)
     .slice(0, 10);
 
+  // Don't overwrite the Discord leaderboard message when we have no local data
+  // (prevents a fresh deploy from blanking out the real leaderboard)
+  if (sorted.length === 0) {
+    console.log("[Leaderboard] No pesetas data locally — skipping Discord update to preserve existing message.");
+    return;
+  }
+
   const embed = buildPesetasLeaderboardEmbed(sorted);
   const existingId = loadPersistentMsgId(PESETAS_LB_MSG_ID_FILE, "1515326464088866927");
 
@@ -1861,25 +1879,29 @@ const OUTLET_RSS_MAP: Record<string, string> = {
   "gameinformer.com":  "https://www.gameinformer.com/rss.xml",
 };
 
-// For a Google News item, try to find the same article on the outlet's own RSS and return its image
-async function fetchOutletImageForGoogleNewsItem(item: RssItem): Promise<string | null> {
+// For a Google News item, find the same article on the outlet's own RSS — returns image + description
+async function fetchOutletDataForGoogleNewsItem(item: RssItem): Promise<{ image: string | null; description: string | null }> {
   try {
     const src = item.source;
     const sourceUrl: string | undefined = typeof src === "string" ? undefined : src?.["@_url"];
-    if (!sourceUrl) return null;
+    if (!sourceUrl) return { image: null, description: null };
     const domain = Object.keys(OUTLET_RSS_MAP).find((d) => sourceUrl.includes(d));
-    if (!domain) return null;
+    if (!domain) return { image: null, description: null };
     const feedUrl = OUTLET_RSS_MAP[domain];
     const outletItems = await fetchFeedItems(feedUrl);
-    // Normalise title for fuzzy match (strip source suffix, lowercase, first 40 chars)
     const normTitle = (item.title ?? "").replace(/ - [^-]+$/, "").toLowerCase().slice(0, 40);
     const match = outletItems.find((oi) => {
       const ot = (oi.title ?? "").toLowerCase().slice(0, 40);
       return ot.includes(normTitle.slice(0, 30)) || normTitle.includes(ot.slice(0, 30));
     });
-    if (!match) return null;
-    return extractRssImage(match);
-  } catch { return null; }
+    if (!match) return { image: null, description: null };
+    return { image: extractRssImage(match), description: match.description ?? null };
+  } catch { return { image: null, description: null }; }
+}
+
+async function fetchOutletImageForGoogleNewsItem(item: RssItem): Promise<string | null> {
+  const { image } = await fetchOutletDataForGoogleNewsItem(item);
+  return image;
 }
 
 function extractRssImage(item: RssItem): string | null {
@@ -1994,24 +2016,39 @@ async function fetchAndBroadcastNews() {
     const title = item.title?.replace(/ - .*$/, "").trim() || "Resident Evil News";
     const pubDate = item.pubDate ? new Date(item.pubDate).toUTCString() : "";
     let imageUrl = extractRssImage(item);
+    let itemDescription = item.description ?? "";
+
     // Reddit posts: use JSON API for high-res previews
     if (rawUrl.includes("reddit.com/r/")) {
       const redditImg = await fetchRedditThumbnail(rawUrl);
       if (redditImg) imageUrl = redditImg;
     }
-    // Google News item: look up the real outlet's RSS for a matching article image
-    if (!imageUrl && rawUrl.includes("news.google.com")) {
-      imageUrl = await fetchOutletImageForGoogleNewsItem(item);
-      if (imageUrl) console.log(`[News] Got outlet image for Google News item: ${imageUrl}`);
+    // Google News item: look up the real outlet's RSS for a matching article — grab image + description
+    if (rawUrl.includes("news.google.com")) {
+      const outletData = await fetchOutletDataForGoogleNewsItem(item);
+      if (outletData.image && !imageUrl) {
+        imageUrl = outletData.image;
+        console.log(`[News] Got outlet image for Google News item: ${imageUrl}`);
+      }
+      // Use outlet description if item description is absent or just the title
+      if (outletData.description && (!itemDescription || itemDescription.trim() === title)) {
+        itemDescription = outletData.description;
+      }
     }
-    // Description may contain an image URL
+    // Description field may embed an image URL
     if (!imageUrl) {
-      const desc = String(item.description ?? "");
-      const urlMatch = desc.match(/https?:\/\/[^\s\"]+\.(?:png|jpg|jpeg|gif|webp)/i);
+      const urlMatch = itemDescription.match(/https?:\/\/[^\s\"]+\.(?:png|jpg|jpeg|gif|webp)/i);
       if (urlMatch) imageUrl = urlMatch[0];
     }
-    // Last resort: OG scrape (only for non-Google-News URLs — those never yield real images)
-    if (!imageUrl && !rawUrl.includes("news.google.com")) imageUrl = await fetchOgImage(rawUrl);
+    // OG scrape fallback — for Google News, resolve the redirect to the real article URL first
+    if (!imageUrl) {
+      const scrapeTarget = rawUrl.includes("news.google.com")
+        ? await resolveRedirectUrl(rawUrl)
+        : rawUrl;
+      if (!scrapeTarget.includes("news.google.com")) {
+        imageUrl = await fetchOgImage(scrapeTarget);
+      }
+    }
 
     const embed = new EmbedBuilder()
       .setColor(0xff0000)
@@ -2019,7 +2056,7 @@ async function fetchAndBroadcastNews() {
       .setURL(rawUrl)
       .setDescription(
         `> **\u2014 INCOMING TRANSMISSION \u2014**\n> \n` +
-        buildSummaryFromDescription(item.description || title, title) +
+        buildSummaryFromDescription(itemDescription || title, title) +
         `\n> \n> **SOURCE:** [Read full article](${rawUrl})\n` +
         (pubDate ? `> **BROADCAST TIME:** ${pubDate}` : "")
       )
